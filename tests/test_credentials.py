@@ -5,7 +5,9 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -163,21 +165,64 @@ def test_sign_out_racing_blocked_refresh_revokes_latest_and_cannot_resurrect(con
         first.get_access_token()
 
 
-@pytest.mark.parametrize("terminal", [True, False])
-def test_refresh_recovery_preserves_only_retryable_credentials(connected, terminal):
-    """Provider invalid_grant clears tokens and a transient outage keeps them for retry."""
+def test_expired_access_can_renew_without_browser_reauthorization(connected, monkeypatch):
+    """Access expiry keeps the grant and waits for a Python caller to renew."""
     first, second, provider, _ = connected
-    provider.refresh_response = httpx.Response(
-        400 if terminal else 503, json={"error": "invalid_grant", "detail": "sensitive-upstream"}
+    after_expiry = time.time() + 25
+    monkeypatch.setattr(
+        "daily_ml.connection.time", SimpleNamespace(time=lambda: after_expiry, monotonic=time.monotonic)
     )
+
+    expired = second.get_status()
+    assert expired.state == "renewal_needed"
+    assert expired.plan_authorized
+    assert not expired.access_token_usable
+    assert not expired.reauthorization_required
+    assert provider.refresh_calls == []
+
+    assert first.get_access_token() == "rotated-access"
+    renewed = second.get_status()
+    assert renewed.state == "connected"
+    assert renewed.plan_authorized and renewed.access_token_usable
+    assert not renewed.reauthorization_required
+    assert len(provider.refresh_calls) == 1
+    assert len(provider.code_calls) == 1
+
+
+@pytest.mark.parametrize("shape", ["flat", "nested"])
+@pytest.mark.parametrize(
+    ("http_status", "code", "terminal"),
+    [
+        (400, "invalid_grant", True),
+        (401, "refresh_token_invalidated", True),
+        (401, "refresh_token_expired", True),
+        (429, "invalid_grant", False),
+        (503, "refresh_token_invalidated", False),
+        (401, "unknown_refresh_failure", False),
+    ],
+)
+def test_refresh_recovery_preserves_only_retryable_credentials(connected, shape, http_status, code, terminal):
+    """Known terminal codes clear tokens across both provider response shapes."""
+    first, second, provider, _ = connected
+    error = code if shape == "flat" else {"code": code}
+    provider.refresh_response = httpx.Response(http_status, json={"error": error, "detail": "sensitive-upstream"})
     with pytest.raises(ConnectionError) as raised:
         first.get_access_token()
     assert "sensitive-upstream" not in str(raised.value)
+    status = second.get_status()
+    saved = (first.data_dir / "credentials/session.json").read_text()
     if terminal:
-        assert second.get_status().state == "reconnect"
-        assert "original-refresh" not in (first.data_dir / "credentials/session.json").read_text()
+        assert status.state == "reconnect"
+        assert not status.plan_authorized and not status.access_token_usable
+        assert status.reauthorization_required
+        assert "original-refresh" not in saved and "original-access" not in saved
+        assert start(second, provider)["client_id"] == CLIENT
     else:
-        assert "original-refresh" in (first.data_dir / "credentials/session.json").read_text()
+        assert status.state == "connected"
+        assert status.plan_authorized and status.access_token_usable
+        assert not status.reauthorization_required
+        assert "original-refresh" in saved
+        assert "signing in" not in str(raised.value)
         provider.refresh_response = None
         assert second.get_access_token() == "rotated-access"
 

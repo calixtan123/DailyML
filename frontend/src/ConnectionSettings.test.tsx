@@ -8,10 +8,14 @@ const offline = {
   email: null as string | null,
   requires_consent: false,
   plan_authorized: false,
+  access_token_usable: false,
+  reauthorization_required: false,
   message: null,
   remote_revocation_unconfirmed: false,
 }
-const connected = { ...offline, state: 'connected', email: 'learner@example.test', plan_authorized: true }
+const connected = {
+  ...offline, state: 'connected', email: 'learner@example.test', plan_authorized: true, access_token_usable: true,
+}
 
 function mockApi(initial = offline) {
   let current = initial
@@ -79,10 +83,20 @@ describe('ChatGPT connection controls', () => {
     await screen.findByText('Signing in')
   })
 
-  it('shows reconnect and exposes a remote revocation failure after local sign-out', async () => {
-    const api = mockApi({ ...connected, state: 'reconnect', plan_authorized: false })
-    render(<ConnectionSettings request={api.request} />)
+  it('offers browser reauthorization when refresh was rejected', async () => {
+    const { request } = mockApi({
+      ...offline, state: 'reconnect', email: connected.email, reauthorization_required: true,
+    })
+    render(<ConnectionSettings request={request} />)
     await screen.findByText('Reconnect required')
+    expect(screen.getByRole('button', { name: 'Continue with ChatGPT' })).toBeTruthy()
+    expect(screen.queryByText('ChatGPT plan use authorized')).toBeNull()
+  })
+
+  it('exposes a remote revocation failure after local sign-out', async () => {
+    const api = mockApi(connected)
+    render(<ConnectionSettings request={api.request} />)
+    await screen.findByText('Connected')
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
     await screen.findByText('Signed out')
     expect(screen.getByText(/Remote revocation could not be confirmed/)).toBeTruthy()
@@ -90,17 +104,22 @@ describe('ChatGPT connection controls', () => {
       .toBe('https://chatgpt.com/settings/usage')
   })
 
-  it('notices expired authorization while Settings remains visible', async () => {
+  it('shows access expiry with saved plan permission and no browser reauthorization', async () => {
     vi.useFakeTimers()
     try {
       const api = mockApi(connected)
       render(<ConnectionSettings request={api.request} />)
       await act(async () => {})
       expect(screen.getByText('Connected')).toBeTruthy()
-      api.changeStatus({ ...connected, state: 'reconnect', plan_authorized: false })
-      await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
-      expect(screen.getByText('Reconnect required')).toBeTruthy()
+      api.changeStatus({ ...connected, state: 'renewal_needed', access_token_usable: false })
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+      expect(screen.getByText('Access renewal needed')).toBeTruthy()
+      expect(screen.getByText('ChatGPT plan permission saved')).toBeTruthy()
+      expect(screen.queryByRole('button', { name: 'Continue with ChatGPT' })).toBeNull()
       expect(screen.queryByText('ChatGPT plan use authorized')).toBeNull()
+      api.changeStatus(connected)
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+      expect(screen.getByText('Connected')).toBeTruthy()
     } finally {
       vi.useRealTimers()
     }
@@ -139,5 +158,44 @@ describe('ChatGPT connection controls', () => {
     await screen.findByRole('alert')
     fireEvent.click(screen.getByRole('button', { name: 'Retry status' }))
     await screen.findByText('Signed out')
+  })
+
+  it('hides live authorization after a failed status read and recovers on the next poll', async () => {
+    vi.useFakeTimers()
+    try {
+      const api = mockApi(connected)
+      render(<ConnectionSettings request={api.request} />)
+      await act(async () => {})
+      expect(screen.getByText('ChatGPT plan use authorized')).toBeTruthy()
+
+      api.spy.mockRejectedValueOnce(new Error('The local server is unavailable.'))
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+      expect(screen.getByText('Status unavailable')).toBeTruthy()
+      expect(screen.queryByText('Connected')).toBeNull()
+      expect(screen.queryByText('ChatGPT plan use authorized')).toBeNull()
+      expect(screen.getByRole('button', { name: 'Retry status' })).toBeTruthy()
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+      expect(screen.getByText('Connected')).toBeTruthy()
+      expect(screen.getByText('ChatGPT plan use authorized')).toBeTruthy()
+      expect(screen.queryByRole('alert')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps a confirmed connection when sign-out fails', async () => {
+    const api = mockApi(connected)
+    render(<ConnectionSettings request={api.request} />)
+    await screen.findByText('Connected')
+
+    api.spy.mockRejectedValueOnce(new Error('Sign-out could not finish.'))
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
+    expect((await screen.findByRole('alert')).textContent).toContain('Sign-out could not finish.')
+    await act(async () => { fireEvent(window, new Event('focus')) })
+    expect(screen.getByText('Connected')).toBeTruthy()
+    expect(screen.getByText('ChatGPT plan use authorized')).toBeTruthy()
+    expect(screen.queryByText('Status unavailable')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry status' })).toBeNull()
   })
 })

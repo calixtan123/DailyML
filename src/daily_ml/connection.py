@@ -30,7 +30,8 @@ CALLBACK_PATH = "/auth/callback"
 CALLBACK_TIMEOUT = 180
 REFRESH_WINDOW = 60
 ConnectionState = Literal[
-    "signed_out", "signing_in", "connected", "reconnect", "declined", "cancelled", "timeout", "error",
+    "signed_out", "signing_in", "connected", "renewal_needed", "reconnect",
+    "declined", "cancelled", "timeout", "error",
 ]
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ class ConnectionError(RuntimeError):
 
 @dataclass(frozen=True)
 class ConnectionStatus:
-    """Public connection information, without OAuth credentials."""
+    """Public status with separate facts for the saved grant, token expiry and reauthorization."""
 
     state: ConnectionState
     email: str | None = None
@@ -49,6 +50,8 @@ class ConnectionStatus:
     message: str | None = None
     remote_revocation_unconfirmed: bool = False
     requires_consent: bool = False
+    access_token_usable: bool = False
+    reauthorization_required: bool = False
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,8 @@ class SignInStart:
 
 @dataclass
 class _Attempt:
+    """One sign-in started by Connection whose validated result only the callback worker can publish."""
+
     server: "_CallbackServer"
     client_id: str
     generation: UUID
@@ -386,7 +391,7 @@ class Connection:
                 same_client = current.account.client_id == account.client_id
                 replacing = current.client_rejected
                 if current.account.subject != account.subject:
-                    raise ConnectionError("Select the original ChatGPT account and workspace to reconnect.")
+                    raise ConnectionError("Select your original ChatGPT account to reconnect.")
                 if replacing and (attempt.client_id != DYNAMIC_CLIENT or same_client):
                     raise ConnectionError("ChatGPT did not issue a new registration. Try connecting again.")
                 if not replacing and not same_client:
@@ -413,28 +418,45 @@ class Connection:
         """
         with self._mutex:
             session = self._read()
-            authorized = bool(session.tokens and session.tokens.expires_at > time.time())
+            tokens = session.tokens
+            plan_authorized = tokens is not None
+            access_token_usable = tokens is not None and tokens.expires_at > time.time()
+            reauthorization_required = session.reconnect or (
+                plan_authorized and (session.client_rejected or session.requires_consent)
+            )
             message = None
             if self._attempt is not None and self._attempt.generation == session.generation:
                 state = "signing_in"
             elif self._notice and self._notice[0] == session.generation:
                 _, state, message = self._notice
-            elif authorized and not (session.client_rejected or session.requires_consent):
-                state = "connected"
-            elif session.tokens or session.reconnect:
+            elif reauthorization_required:
                 state = "reconnect"
                 if session.client_rejected:
-                    message = "ChatGPT rejected this registration. Connect the original account again."
+                    message = "ChatGPT rejected this registration."
                 elif session.requires_consent:
                     message = "Enable ChatGPT plan use to grant permission in ChatGPT."
                 else:
-                    message = "The ChatGPT session needs renewal."
+                    message = "The saved ChatGPT session can no longer be renewed. Reconnect in Settings."
+            elif access_token_usable:
+                state = "connected"
+            elif plan_authorized:
+                state = "renewal_needed"
+                message = "Daily ML Practice renews access when a request needs it."
             else:
                 state = "signed_out"
+            if session.client_rejected:
+                workspace_hint = "Select your original ChatGPT account and intended workspace when signing in."
+                message = f"{message} {workspace_hint}" if message else workspace_hint
             email = session.account.email if session.account and state != "signed_out" else None
             return ConnectionStatus(
-                state, email, authorized, message, session.remote_revocation_unconfirmed,
-                session.requires_consent,
+                state=state,
+                email=email,
+                plan_authorized=plan_authorized,
+                message=message,
+                remote_revocation_unconfirmed=session.remote_revocation_unconfirmed,
+                requires_consent=session.requires_consent,
+                access_token_usable=access_token_usable,
+                reauthorization_required=reauthorization_required,
             )
 
     def cancel_sign_in(self) -> ConnectionStatus:

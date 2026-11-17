@@ -1,11 +1,12 @@
 import { ExternalLink } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { LocalRequest } from './api'
 
 const LABELS = {
   signed_out: 'Signed out',
   signing_in: 'Signing in',
   connected: 'Connected',
+  renewal_needed: 'Access renewal needed',
   reconnect: 'Reconnect required',
   declined: 'Authorization declined',
   cancelled: 'Sign-in cancelled',
@@ -17,6 +18,8 @@ type Status = {
   state: keyof typeof LABELS
   email: string | null
   plan_authorized: boolean
+  access_token_usable: boolean
+  reauthorization_required: boolean
   message: string | null
   remote_revocation_unconfirmed: boolean
   requires_consent: boolean
@@ -28,13 +31,15 @@ const STATUS_POLL_MS = 15_000
 const LAUNCH_PATH = /^\/api\/connection\/authorize\/[A-Za-z0-9_-]+$/
 
 export function ConnectionSettings({ request }: { request: LocalRequest }) {
-  const [status, setStatus] = useState<Status>()
+  const [lastStatus, setLastStatus] = useState<Status>()
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
+  const [statusError, setStatusError] = useState<string>()
+  const [actionError, setActionError] = useState<string>()
   const [launchPath, setLaunchPath] = useState('')
-  const [statusVersion, setStatusVersion] = useState(0)
+  const refreshStatus = useRef<(() => void) | null>(null)
 
-  const phase = status?.state
+  const phase = lastStatus?.state
+  const status = statusError === undefined ? lastStatus : undefined
   useEffect(() => {
     if (busy) return
 
@@ -57,12 +62,13 @@ export function ConnectionSettings({ request }: { request: LocalRequest }) {
         const next = await request<Status>(CONNECTION, { signal: controller.signal })
         if (controller.signal.aborted) return
         nextPhase = next.state
-        setStatus(next)
-        setError('')
+        setLastStatus(next)
+        setStatusError(undefined)
         if (next.state !== 'signing_in') setLaunchPath('')
       } catch (failure) {
         if (!controller.signal.aborted) {
-          setError(failure instanceof Error ? failure.message : 'Could not load connection status.')
+          const detail = failure instanceof Error ? failure.message : ''
+          setStatusError(detail || 'Could not load connection status.')
         }
       } finally {
         if (!controller.signal.aborted) schedule(nextPhase)
@@ -70,6 +76,7 @@ export function ConnectionSettings({ request }: { request: LocalRequest }) {
     }
 
     const refresh = () => { void readStatus() }
+    refreshStatus.current = refresh
     window.addEventListener('focus', refresh)
     document.addEventListener('visibilitychange', refresh)
     if (phase === undefined) refresh()
@@ -78,23 +85,26 @@ export function ConnectionSettings({ request }: { request: LocalRequest }) {
     return () => {
       activeRead?.abort()
       clearTimeout(timer)
+      refreshStatus.current = null
       window.removeEventListener('focus', refresh)
       document.removeEventListener('visibilitychange', refresh)
     }
-  }, [request, busy, phase, statusVersion])
+  }, [request, busy, phase])
 
   async function signIn() {
     const popup = window.open('about:blank', '_blank')
     if (popup) popup.opener = null
     setBusy(true)
-    setError('')
+    setActionError(undefined)
     try {
       const reply = await request<{ launch_path: string }>(CONNECTION + '/sign-in', { method: 'POST' })
       if (!LAUNCH_PATH.test(reply.launch_path)) throw new Error('The local sign-in link was invalid.')
-      setStatus({
+      setLastStatus({
         state: 'signing_in',
         email: status?.email ?? null,
         plan_authorized: status?.plan_authorized ?? false,
+        access_token_usable: status?.access_token_usable ?? false,
+        reauthorization_required: status?.reauthorization_required ?? false,
         message: null,
         remote_revocation_unconfirmed: status?.remote_revocation_unconfirmed ?? false,
         requires_consent: status?.requires_consent ?? false,
@@ -110,7 +120,7 @@ export function ConnectionSettings({ request }: { request: LocalRequest }) {
       }
     } catch (failure) {
       popup?.close()
-      setError(failure instanceof Error ? failure.message : 'Could not start sign-in.')
+      setActionError(failure instanceof Error ? failure.message : 'Could not start sign-in.')
     } finally {
       setBusy(false)
     }
@@ -118,12 +128,12 @@ export function ConnectionSettings({ request }: { request: LocalRequest }) {
 
   async function finish(action: 'cancel' | 'sign-out') {
     setBusy(true)
-    setError('')
+    setActionError(undefined)
     try {
-      setStatus(await request<Status>(CONNECTION + '/' + action, { method: 'POST' }))
+      setLastStatus(await request<Status>(CONNECTION + '/' + action, { method: 'POST' }))
       setLaunchPath('')
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : 'Could not update the connection.')
+      setActionError(failure instanceof Error ? failure.message : 'Could not update the connection.')
     } finally {
       setBusy(false)
     }
@@ -131,16 +141,21 @@ export function ConnectionSettings({ request }: { request: LocalRequest }) {
 
   const signingIn = status?.state === 'signing_in'
   const hasAccount = status?.email || status?.plan_authorized
+  const error = statusError ?? actionError
   return (
     <section className="panel" aria-labelledby="chatgpt-heading">
       <h2 id="chatgpt-heading">ChatGPT connection</h2>
       <div className="settings-row connection-row">
         <div aria-live="polite">
-          <p className={status?.plan_authorized ? 'state authorized' : 'state'}>
-            {status ? LABELS[status.state] : error ? 'Status unavailable' : 'Checking connection…'}
+          <p className={status?.state === 'connected' && status.access_token_usable ? 'state authorized' : 'state'}>
+            {status ? LABELS[status.state] : statusError ? 'Status unavailable' : 'Checking connection…'}
           </p>
           {status?.email && <p>{status.email}</p>}
-          {status?.plan_authorized && <p className="muted">ChatGPT plan use authorized</p>}
+          {status?.plan_authorized && (
+            <p className="muted">
+              {status.access_token_usable ? 'ChatGPT plan use authorized' : 'ChatGPT plan permission saved'}
+            </p>
+          )}
           {signingIn && <p className="muted">Complete authorization in the ChatGPT tab.</p>}
           {status?.message && <p className="muted">{status.message}</p>}
         </div>
@@ -154,7 +169,7 @@ export function ConnectionSettings({ request }: { request: LocalRequest }) {
             </>
           ) : (
             <>
-              {status && status.state !== 'connected' && (
+              {status && (!status.plan_authorized || status.reauthorization_required) && (
                 <button className="chatgpt-button" data-oai-siwc-button="" disabled={busy} onClick={() => void signIn()}>
                   {status.requires_consent ? 'Enable ChatGPT plan use' : 'Continue with ChatGPT'}
                 </button>
@@ -162,11 +177,8 @@ export function ConnectionSettings({ request }: { request: LocalRequest }) {
               {hasAccount && <button disabled={busy} onClick={() => void finish('sign-out')}>Sign out</button>}
             </>
           )}
-          {error && (
-            <button disabled={busy} onClick={() => {
-              setStatus(undefined)
-              setStatusVersion((version) => version + 1)
-            }}>Retry status</button>
+          {statusError && (
+            <button disabled={busy} onClick={() => refreshStatus.current?.()}>Retry status</button>
           )}
         </div>
       </div>

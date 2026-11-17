@@ -240,7 +240,9 @@ def test_rejected_client_only_replaced_after_verified_new_registration(flow, fai
     assert returning["client_id"] == CLIENT
     provider.code_response = httpx.Response(401, json={"error": {"code": "invalid_client"}})
     callback(returning, client_id=None)
-    assert wait_for(connection, "error").plan_authorized
+    status = wait_for(connection, "error")
+    assert status.plan_authorized
+    assert "intended workspace" in status.message
     assert connection.get_access_token() == "original-access"
 
     provider.code_response = None

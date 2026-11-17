@@ -151,17 +151,17 @@ class OpenAIOAuth:
                 try:
                     payload = json.loads(body)
                     value = payload.get("error") if isinstance(payload, dict) else None
+                    if isinstance(value, dict):
+                        value = value.get("code")
                     if isinstance(value, str) and value in TERMINAL_REFRESH | {"invalid_client"}:
                         code = value
-                    if isinstance(value, dict) and value.get("code") == "invalid_client":
-                        code = "invalid_client"
                 except ValueError:
                     pass
             if code == "invalid_client":
                 raise OAuthError("ChatGPT rejected this registration. Try connecting again.", code=code)
             if status >= 500 or status == 429:
                 raise OAuthError("ChatGPT is temporarily unavailable. Try again.", transient=True)
-            raise OAuthError("ChatGPT did not accept the authorization. Try signing in again.", code=code)
+            raise OAuthError("ChatGPT did not accept the authorization. Try again.", code=code)
         try:
             reply = TokenReply.model_validate_json(body)
         except ValidationError:
