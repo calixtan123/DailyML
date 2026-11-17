@@ -1,0 +1,58 @@
+{
+  "id": "data-leakage",
+  "version": 1,
+  "domain_id": "machine-learning",
+  "section_id": "fundamentals",
+  "concept_id": "data-leakage",
+  "tags": [
+    "evaluation",
+    "preprocessing"
+  ],
+  "difficulty": "introductory",
+  "question_type": "scenario",
+  "title": "Data leakage",
+  "prompt": "You standardise every row in a used-car dataset before splitting it into train and test sets. How can that affect the test score, and how would you prevent the problem?",
+  "objective": "Identify preprocessing leakage and fit transformations using training data only.",
+  "expected_scope": "Identify the information leak, explain the risk to evaluation and describe the corrected sequence.",
+  "expected_answer_words": [
+    50,
+    100
+  ],
+  "hint": "Consider which rows contribute to the mean and standard deviation.",
+  "reference_explanation": "Standardising before the split lets test rows contribute to the means and scales used to train the model. This can make the evaluation optimistically biased. Split first, fit the scaler on training data, then apply that fitted scaler to both sets. With cross-validation, use a pipeline so the scaler is fitted on each training fold.",
+  "criteria": [
+    {
+      "id": "identify-leak",
+      "description": "Identifies that held-out rows influence fitted preprocessing statistics.",
+      "weight": "0.35"
+    },
+    {
+      "id": "evaluation-risk",
+      "description": "Explains that using test information can bias the evaluation.",
+      "weight": "0.25"
+    },
+    {
+      "id": "fit-on-train",
+      "description": "Splits first, fits only on training data and reuses the fitted transformation.",
+      "weight": "0.40"
+    }
+  ],
+  "critical_misconceptions": [
+    "Claiming test information cannot leak through preprocessing unless the test labels are used."
+  ],
+  "sources": [
+    {
+      "id": "sklearn-leakage",
+      "title": "scikit-learn — Data leakage",
+      "url": "https://scikit-learn.org/stable/common_pitfalls.html#data-leakage",
+      "reviewed_on": "2026-11-17",
+      "supports": [
+        "objective",
+        "identify-leak",
+        "evaluation-risk",
+        "fit-on-train"
+      ]
+    }
+  ],
+  "retired": false
+}

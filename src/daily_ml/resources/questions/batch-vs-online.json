@@ -1,0 +1,58 @@
+{
+  "id": "batch-vs-online",
+  "version": 1,
+  "domain_id": "deployment",
+  "section_id": "deployment",
+  "concept_id": "batch-vs-online",
+  "tags": [
+    "inference",
+    "latency"
+  ],
+  "difficulty": "introductory",
+  "question_type": "comparison",
+  "title": "Batch versus online inference",
+  "prompt": "A shop wants to score every item overnight and answer a personalised prediction request while a customer waits. Which inference mode fits each job, and what constraints drive your choice?",
+  "objective": "Choose batch or online inference based on how soon predictions must be available.",
+  "expected_scope": "Match each job to a mode and compare response-time, scheduling or throughput considerations.",
+  "expected_answer_words": [
+    50,
+    100
+  ],
+  "hint": "Ask whether the person using the prediction can wait for a scheduled job.",
+  "reference_explanation": "Use batch inference for the overnight catalogue run. It can process a large group of items in a scheduled job and save the results for later. Use online inference for a customer who needs a prediction computed from the current request, because the service needs to respond with low latency. Batch may amortise setup across many records. Online serving needs capacity when requests arrive.",
+  "criteria": [
+    {
+      "id": "batch-fit",
+      "description": "Chooses batch inference for the scheduled catalogue job and explains why.",
+      "weight": "0.35"
+    },
+    {
+      "id": "online-fit",
+      "description": "Chooses online inference for an on-demand request and explains the latency constraint.",
+      "weight": "0.35"
+    },
+    {
+      "id": "operational-tradeoff",
+      "description": "Explains a throughput, scheduling or serving capacity trade-off.",
+      "weight": "0.30"
+    }
+  ],
+  "critical_misconceptions": [
+    "Saying that ‘online inference’ means the model retrains with every request."
+  ],
+  "sources": [
+    {
+      "id": "vertex-predictions",
+      "title": "Google Cloud — Get predictions on an AI Platform model",
+      "url": "https://cloud.google.com/vertex-ai/docs/predictions/overview",
+      "reviewed_on": "2026-11-17",
+      "supports": [
+        "objective",
+        "batch-fit",
+        "online-fit",
+        "operational-tradeoff"
+      ]
+    }
+  ],
+  "retired": false
+}

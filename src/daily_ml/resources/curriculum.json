@@ -1,0 +1,67 @@
+{
+  "domains": [
+    {
+      "id": "machine-learning",
+      "sections": [
+        {
+          "id": "fundamentals",
+          "title": "Fundamentals",
+          "concepts": [
+            "generalisation",
+            "data-leakage",
+            "evaluation-metrics"
+          ]
+        },
+        {
+          "id": "forests",
+          "title": "Forests",
+          "concepts": [
+            "forest-mechanics",
+            "tree-diversity"
+          ]
+        },
+        {
+          "id": "other-ensembles",
+          "title": "Other ensembles",
+          "concepts": [
+            "bagging-vs-boosting",
+            "boosting-tradeoffs"
+          ]
+        },
+        {
+          "id": "deep-learning",
+          "title": "Deep learning",
+          "concepts": [
+            "backpropagation",
+            "deep-learning-overfitting"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "deployment",
+      "sections": [
+        {
+          "id": "deployment",
+          "title": "Deployment",
+          "concepts": [
+            "batch-vs-online"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "mlops",
+      "sections": [
+        {
+          "id": "mlops",
+          "title": "MLOps",
+          "concepts": [
+            "reproducible-preprocessing",
+            "production-monitoring"
+          ]
+        }
+      ]
+    }
+  ]
+}

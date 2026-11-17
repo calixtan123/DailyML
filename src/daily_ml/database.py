@@ -41,8 +41,13 @@ class Database:
             )
 
     @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
+    def connect(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         """Open a connection, committing on success and rolling back on error.
+
+        Parameters
+        ----------
+        immediate : bool
+            Reserve the write transaction before read-then-write operations.
 
         Yields
         ------
@@ -52,6 +57,8 @@ class Database:
         with closing(sqlite3.connect(self.path, timeout=SQLITE_WAIT_SECONDS)) as connection:
             connection.execute("PRAGMA foreign_keys = ON")
             with connection:
+                if immediate:
+                    connection.execute("BEGIN IMMEDIATE")
                 yield connection
 
     def get_preferences(self) -> Preferences:

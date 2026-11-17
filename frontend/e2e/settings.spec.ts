@@ -16,7 +16,7 @@ async function stop(process: ChildProcess) {
   })
 }
 
-test('Settings is usable on the installed origin and can cancel a real local sign-in attempt',
+test('The installed app browses questions and preserves Settings and sign-in controls',
   async ({ page, context }) => {
     const root = await mkdtemp(join(tmpdir(), 'daily-ml browser '))
     const executable = process.env.DML_E2E_EXECUTABLE ?? resolve('../.venv/bin/daily-ml')
@@ -59,7 +59,38 @@ test('Settings is usable on the installed origin and can cancel a real local sig
       })
 
       await page.goto(origin)
+      await expect(page.getByRole('heading', { name: 'Browse questions' })).toBeVisible()
+      await expect(page).toHaveTitle('Today · Daily ML Practice')
+      const section = page.getByRole('combobox', { name: 'Section', exact: true })
+      await expect(section).toHaveValue('fundamentals')
+      await expect(section.getByRole('option')).toHaveCount(6)
+      await page.keyboard.press('Tab')
+      const skip = page.getByRole('link', { name: 'Skip to content' })
+      await expect(skip).toBeFocused()
+      await skip.press('Enter')
+      await expect(page.getByRole('main')).toBeFocused()
+      await page.keyboard.press('Tab')
+      await expect(section).toBeFocused()
+      await section.selectOption('deployment')
+      await expect(section).toHaveValue('deployment')
+      await expect(page.getByRole('heading', { name: 'Batch versus online inference' })).toBeVisible()
+      await expect(page.getByText(/A shop wants to score every item overnight/)).toBeVisible()
+      await expect(page.getByText(/Choose batch or online inference based on/)).toBeVisible()
+      for (const width of [1440, 1024, 768, 390, 320]) {
+        await page.setViewportSize({ width, height: 900 })
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
+      }
+      await page.setViewportSize({ width: 768, height: 900 })
+      await page.evaluate(() => { document.body.style.zoom = '2' })
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(768)
+      await section.selectOption('forests')
+      await expect(page.getByRole('combobox', { name: 'Question', exact: true }).getByRole('option')).toHaveCount(2)
+      await expect(page.getByRole('heading', { name: 'How random forests work' })).toBeVisible()
+      await page.evaluate(() => { document.body.style.zoom = '1' })
+
+      await page.getByRole('link', { name: 'Settings', exact: true }).click()
       await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible()
+      await expect(page).toHaveTitle('Settings · Daily ML Practice')
       await expect(page.getByText('Signed out', { exact: true })).toBeVisible()
       for (const width of [1440, 1024, 768, 390, 320]) {
         await page.setViewportSize({ width, height: 900 })
@@ -69,6 +100,8 @@ test('Settings is usable on the installed origin and can cancel a real local sig
       await page.evaluate(() => { document.body.style.zoom = '2' })
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(768)
       await page.evaluate(() => { document.body.style.zoom = '1' })
+      await page.reload()
+      await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible()
       await page.keyboard.press('Tab')
       await expect(page.getByRole('link', { name: 'Skip to content' })).toBeFocused()
 
@@ -95,6 +128,10 @@ test('Settings is usable on the installed origin and can cancel a real local sig
       await expect(page.getByText('Timezone saved.')).toBeVisible()
       await page.reload()
       await expect(timezone).toHaveValue('UTC')
+
+      await page.getByRole('link', { name: 'Today', exact: true }).click()
+      await expect(page.getByRole('heading', { name: 'Browse questions' })).toBeVisible()
+      await expect(page).toHaveTitle('Today · Daily ML Practice')
     } finally {
       await stop(child)
       await rm(root, { recursive: true, force: true })
