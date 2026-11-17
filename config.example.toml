@@ -1,0 +1,12 @@
+# Copy to ~/Library/Application Support/Daily ML Practice/config.toml,
+# or choose a file with --config or DML_CONFIG.
+# A relative data_dir is resolved beside this TOML.
+# data_dir = "~/Library/Application Support/Daily ML Practice/"
+# timezone = "Europe/London"
+# review_intervals = [1, 3, 7, 14, 30]
+# grade_thresholds = [0.25, 0.60, 0.85]
+# answer_limit = 8000
+# request_timeout = 60
+# port = 0
+# model_id is reserved for a later grading slice.
+# model_id = "model-from-your-connected-account"

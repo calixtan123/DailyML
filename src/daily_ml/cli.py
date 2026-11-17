@@ -1,0 +1,172 @@
+"""Launch the installed app on one owned loopback socket and data directory."""
+
+import argparse
+import asyncio
+import logging
+import socket
+import sqlite3
+import webbrowser
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+import uvicorn
+
+from .app import LaunchError, create_app, resolve_assets
+from .config import ConfigError, load_settings, resolve_installation
+from .credentials import StorageError
+from .locking import LockBusy, file_lock
+
+LOOPBACK = "127.0.0.1"
+logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def own_data_directory(data_dir: Path) -> Iterator[None]:
+    """Hold the installation's single-server lock until shutdown.
+
+    Parameters
+    ----------
+    data_dir : Path
+        Resolved local app data directory.
+
+    Yields
+    ------
+    None
+        While this process owns the directory.
+
+    Raises
+    ------
+    LaunchError
+        If another server already owns the directory.
+    """
+    data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        with file_lock(data_dir / ".server.lock", wait=0):
+            yield
+    except LockBusy:
+        raise LaunchError("Daily ML Practice is already running for this data directory.") from None
+
+
+def bind_loopback(port: int) -> socket.socket:
+    """Reserve an IPv4 loopback socket without a check-then-bind gap.
+
+    Parameters
+    ----------
+    port : int
+        Requested port. Zero lets the operating system select an available port.
+
+    Returns
+    -------
+    socket.socket
+        Bound socket to pass directly to the single server.
+
+    Raises
+    ------
+    LaunchError
+        If the requested port cannot be used.
+    """
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((LOOPBACK, port))
+        listener.listen()
+        return listener
+    except OSError:
+        listener.close()
+        raise LaunchError(
+            f"Could not bind 127.0.0.1 port {port}. Close the process using it or set DML_PORT=0."
+        ) from None
+
+
+@contextmanager
+def _logging(data_dir: Path) -> Iterator[None]:
+    """Record only app-owned, redacted events in bounded files and on the console."""
+    app_logger = logging.getLogger("daily_ml")
+    previous_level = app_logger.level
+    previous_propagation = app_logger.propagate
+    file = RotatingFileHandler(data_dir / "daily-ml.log", maxBytes=256_000, backupCount=2, encoding="utf-8")
+    file.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    console = logging.StreamHandler()
+    app_logger.setLevel(logging.INFO)
+    app_logger.propagate = False
+    for handler in (file, console):
+        app_logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        for handler in (file, console):
+            app_logger.removeHandler(handler)
+            handler.close()
+        app_logger.setLevel(previous_level)
+        app_logger.propagate = previous_propagation
+
+
+class _LocalServer(uvicorn.Server):
+    """Open the browser only once the server is ready to accept requests."""
+
+    def __init__(self, config: uvicorn.Config, *, url: str, open_browser: bool) -> None:
+        super().__init__(config)
+        self.url = url
+        self.open_browser = open_browser
+
+    async def startup(self, sockets=None):
+        """Publish the actual URL and optionally launch it in the system browser."""
+        await super().startup(sockets)
+        if not self.started:
+            return
+        logger.info("Daily ML Practice is available at %s — press Ctrl+C to stop.", self.url)
+        if self.open_browser:
+            try:
+                opened = await asyncio.to_thread(webbrowser.open, self.url)
+            except (OSError, webbrowser.Error):
+                opened = False
+            if not opened:
+                logger.info("Could not open the browser. Open the address above manually.")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the installed Daily ML Practice command.
+
+    Parameters
+    ----------
+    argv : Sequence of str or None
+        Command arguments, defaulting to the process arguments.
+
+    Returns
+    -------
+    int
+        Zero after clean shutdown, or one for a startup failure.
+    """
+    parser = argparse.ArgumentParser(prog="daily-ml")
+    commands = parser.add_subparsers(dest="command", required=True)
+    run = commands.add_parser("run", help="Start Daily ML Practice")
+    run.add_argument("--no-browser", action="store_true", help="Print the address and leave the browser closed")
+    run.add_argument("--config", type=Path, help="Use this installation TOML")
+    args = parser.parse_args(argv)
+    try:
+        assets = resolve_assets()
+        installation = resolve_installation(args.config)
+        with own_data_directory(installation.data_dir), _logging(installation.data_dir):
+            settings = load_settings(installation=installation)
+            with bind_loopback(settings.port) as listener:
+                port = listener.getsockname()[1]
+                app = create_app(settings, port=port, assets_dir=assets)
+                config = uvicorn.Config(
+                    app, host=LOOPBACK, port=port, workers=1, access_log=False,
+                    proxy_headers=False, log_level="warning", timeout_graceful_shutdown=25,
+                )
+                server = _LocalServer(
+                    config, url=f"http://{LOOPBACK}:{port}", open_browser=not args.no_browser
+                )
+                server.run(sockets=[listener])
+                if not server.started:
+                    raise LaunchError("Could not start Daily ML Practice. Check local data access.")
+        return 0
+    except KeyboardInterrupt:
+        return 0
+    except (ConfigError, LaunchError, StorageError) as error:
+        parser.exit(1, f"Daily ML Practice: {error}\n")
+    except (OSError, sqlite3.Error):
+        parser.exit(1, "Daily ML Practice: Could not open local data. Check your data directory and permissions.\n")

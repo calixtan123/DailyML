@@ -1,0 +1,47 @@
+name: Offline app checks
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Python tests
+        run: |
+          uv sync --locked
+          uv run --locked pytest -q
+      - name: Frontend tests and build
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend test -- --run
+          npm --prefix frontend run typecheck
+          npm --prefix frontend run build
+      - name: Check installed wheel
+        run: |
+          uv build --wheel
+          uv export --quiet --locked --no-dev --no-emit-project --output-file "$RUNNER_TEMP/runtime-requirements.txt"
+          uv venv --python 3.12 "$RUNNER_TEMP/daily-ml-wheel"
+          uv pip sync --python "$RUNNER_TEMP/daily-ml-wheel/bin/python" "$RUNNER_TEMP/runtime-requirements.txt"
+          uv pip install --no-deps --python "$RUNNER_TEMP/daily-ml-wheel/bin/python" dist/*.whl
+          "$RUNNER_TEMP/daily-ml-wheel/bin/python" scripts/smoke_installed.py dist/*.whl "$RUNNER_TEMP/daily-ml-wheel/bin/daily-ml"
+      - name: Run browser smoke without a live account
+        env:
+          DML_E2E_EXECUTABLE: ${{ runner.temp }}/daily-ml-wheel/bin/daily-ml
+        run: |
+          npm --prefix frontend exec -- playwright install --with-deps chromium
+          npm --prefix frontend run test:e2e
