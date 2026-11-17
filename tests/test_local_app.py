@@ -180,6 +180,49 @@ def test_missing_frontend_assets_has_recovery_message(tmp_path):
         create_app(settings, port=49152, assets_dir=tmp_path / "missing")
 
 
+def test_reference_test_api_saves_model_validates_and_reuses_request(client, monkeypatch):
+    """Protected Settings actions share one persisted assessment across reads."""
+    import httpx
+    from test_provider import catalog, response_stream, terminal
+    import json
+
+    def handle(request):
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json=catalog())
+        assert json.loads(request.content)["model"] == "a"
+        return response_stream(terminal())
+    assert client.get("/api/usage").status_code == 403
+    headers = bootstrap(client)
+    monkeypatch.setattr(client.app.state.connection, "get_access_token", lambda: "fixture-token")
+    client.app.state.grading.provider.transport = httpx.MockTransport(handle)
+    models = client.get("/api/connection/models").json()
+    assert [m["slug"] for m in models["models"]] == ["z", "a"]
+    data = {"model_id": "a", "version": models["version"]}
+    assert client.put("/api/connection/model", json=data).status_code == 403
+    assert client.put("/api/connection/model", headers=headers, json=data).status_code == 200
+    assert client.get("/api/connection/models").json()["selected"] == "a"
+    assert client.get("/api/usage").json()["attempts_24h"] == 0
+    body = {"idempotency_key": "my-action", "model_id": "a"}
+    submitted = client.post("/api/connection/test", headers=headers, json=body)
+    assert submitted.status_code == 202
+    path = "/api/requests/" + submitted.json()["id"]
+    result = client.get(path).json()
+    assert result["state"] == "assessed" and result["grade"] == 1
+    assert client.post("/api/connection/test", headers=headers, json=body).json() == result
+    assert client.get("/api/connection/test").json()["latest"] == result
+    assert client.get("/api/usage").json()["attempts_24h"] == 1
+    assert client.get("/api/requests/missing").status_code == 404
+
+
+def test_signed_out_reference_test_preserves_recovery_without_usage(client):
+    """A lost grant before send leaves the local reference test recoverable."""
+    headers = bootstrap(client)
+    assert client.get("/api/connection/models").status_code == 409
+    reply = client.post("/api/connection/test", headers=headers, json={"model_id": "listed", "idempotency_key": "lost"})
+    assert client.get("/api/requests/" + reply.json()["id"]).json()["state"] == "awaiting_access"
+    assert client.get("/api/usage").json()["attempts_24h"] == 0
+
+
 def test_question_browser_routes_only_expose_public_fields(client):
     """Read actual SQLite prompts with a session and protect assessment content."""
     assert client.get("/api/sections").status_code == 403

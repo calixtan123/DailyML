@@ -6,7 +6,7 @@ import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Query, Request
+from fastapi import BackgroundTasks, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -19,6 +19,9 @@ from .bank import (
 from .config import ConfigError, Settings, save_user_settings
 from .connection import Connection, ConnectionError, ConnectionStatus, SignInStart
 from .database import Database, PreferenceConflict, Preferences
+from .grading import GradingContext
+from .grading_jobs import GradingJobs, RetryConflict
+from .provider import Provider, ProviderFailure
 
 logger = logging.getLogger(__name__)
 MUTATIONS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -38,6 +41,26 @@ class TimezoneEdit(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     timezone: str = Field(min_length=1, max_length=128)
     version: int = Field(ge=0)
+
+
+class ModelSelection(BaseModel):
+    """Validate a selected provider slug for a local Settings action."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    model_id: str = Field(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9._:/-]+$")
+
+
+class ModelEdit(ModelSelection):
+    """Save a model preference against the last observed settings version."""
+
+    version: int = Field(ge=0)
+
+
+class TestAction(ModelSelection):
+    """One explicit reference grading action or recovery."""
+
+    idempotency_key: str = Field(min_length=1, max_length=128)
+    retry_of: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 def resolve_assets(assets_dir: Path | None = None) -> Path:
@@ -105,7 +128,10 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
     async def lifespan(app: FastAPI):
         """Keep OAuth resources alive exactly as long as the server."""
         app.state.connection = Connection(settings.data_dir)
+        provider = Provider(app.state.connection, timeout=settings.request_timeout)
+        app.state.grading = GradingJobs(database, provider, settings)
         try:
+            app.state.grading.recover_interrupted()
             yield
         finally:
             app.state.connection.close()
@@ -244,6 +270,64 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
     def sign_out(request: Request) -> ConnectionStatus:
         """End the ChatGPT session without affecting SQLite."""
         return request.app.state.connection.sign_out()
+
+    @app.exception_handler(ProviderFailure)
+    @app.exception_handler(RetryConflict)
+    async def grading_failure(_request: Request, error: Exception):
+        """Return an allowlisted grading recovery message."""
+        return _error(409, str(error))
+
+    model_override = settings.sources["model_id"] in ("installation", "environment")
+
+    def model_preferences(preferences: Preferences) -> dict:
+        """Expose effective selection without treating missing catalog entries as available."""
+        selected = settings.model_id if model_override else preferences.values.get("model_id")
+        return {"selected": selected, "version": preferences.version,
+                "source": settings.sources["model_id"] if model_override else "preferences" if selected else "default",
+                "overridden": model_override}
+
+    @app.get("/api/connection/models")
+    async def account_models(request: Request) -> dict:
+        """Fetch the actual signed-in account's ordered model catalog."""
+        models = await request.app.state.grading.provider.list_models()
+        return {"models": models, **model_preferences(database.get_preferences())}
+
+    @app.put("/api/connection/model")
+    async def choose_model(edit: ModelEdit, request: Request) -> dict:
+        """Persist a visible account model with the existing conditional preference write."""
+        if model_override:
+            raise PreferenceConflict("Model selection is overridden by installation configuration.")
+        models = await request.app.state.grading.provider.list_models()
+        if edit.model_id not in {model.slug for model in models}:
+            raise ProviderFailure("model_unavailable")
+        values = {**database.get_preferences().values, "model_id": edit.model_id}
+        return model_preferences(save_user_settings(settings, values, expected_version=edit.version))
+
+    @app.get("/api/connection/test")
+    def reference_test(request: Request) -> dict:
+        """Restore the latest result and show the exact fixed input before consent."""
+        return {"reference": GradingContext.connection_test(), "latest": request.app.state.grading.latest_connection_test()}
+
+    @app.post("/api/connection/test", status_code=202)
+    def start_test(action: TestAction, request: Request, background: BackgroundTasks) -> dict:
+        """Persist one explicit connection test before allowing a worker to claim it."""
+        if model_override and action.model_id != settings.model_id:
+            raise PreferenceConflict("Use the model selected by installation configuration.")
+        jobs = request.app.state.grading
+        result = jobs.enqueue_connection_test(action.idempotency_key, action.model_id, retry_of=action.retry_of)
+        if result["state"] == "queued":
+            background.add_task(jobs.run_pending)
+        return result
+
+    @app.get("/api/requests/{request_id}", response_model=None)
+    def read_request(request_id: str, request: Request):
+        """Read stored feedback or recovery state without another model call."""
+        return request.app.state.grading.get_request(request_id) or _error(404, "Grading request not found.")
+
+    @app.get("/api/usage")
+    def observed_usage(request: Request) -> dict[str, int]:
+        """Show the local rolling 24-hour outbound attempt count."""
+        return {"attempts_24h": request.app.state.grading.usage_count()}
 
     def settings_payload(preferences: Preferences) -> dict[str, str | int]:
         """Show the effective timezone, version and override visible to the user."""

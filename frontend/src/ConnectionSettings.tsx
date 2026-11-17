@@ -25,12 +25,19 @@ type Status = {
   requires_consent: boolean
 }
 
+/** Verified grading account, null for no access, or undefined when status is unavailable. */
+export type GradingAccount = string | null | undefined
+
 const CONNECTION = '/api/connection'
 const SIGN_IN_POLL_MS = 450
 const STATUS_POLL_MS = 15_000
 const LAUNCH_PATH = /^\/api\/connection\/authorize\/[A-Za-z0-9_-]+$/
 
-export function ConnectionSettings({ request }: { request: LocalRequest }) {
+/** Show and manage the ChatGPT connection, and report the verified grading account. */
+export function ConnectionSettings({ request, onGradingAccount }: {
+  request: LocalRequest
+  onGradingAccount?: (account: GradingAccount) => void
+}) {
   const [lastStatus, setLastStatus] = useState<Status>()
   const [busy, setBusy] = useState(false)
   const [statusError, setStatusError] = useState<string>()
@@ -40,6 +47,8 @@ export function ConnectionSettings({ request }: { request: LocalRequest }) {
 
   const phase = lastStatus?.state
   const status = statusError === undefined ? lastStatus : undefined
+  const gradingAccount = status && (status.plan_authorized && !status.reauthorization_required ? status.email : null)
+  useEffect(() => { onGradingAccount?.(gradingAccount) }, [onGradingAccount, gradingAccount])
   useEffect(() => {
     if (busy) return
 
@@ -188,7 +197,6 @@ export function ConnectionSettings({ request }: { request: LocalRequest }) {
       )}
       <div className="privacy">
         <h3>Plan usage and privacy</h3>
-        <p>When grading is available, it will send the question, marking guide, reference material and relevant answer or objection to OpenAI. This version only connects your account.</p>
         <p>Eligible grading requests will use your ChatGPT plan or credits if you allow them. Signing out keeps your local learning data. A grading request already sent may still finish.</p>
         <ul className="control-links">
           <li><a href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer">Manage usage and credits <ExternalLink size={14} aria-hidden="true" /></a></li>

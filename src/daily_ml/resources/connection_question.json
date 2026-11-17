@@ -1,0 +1,12 @@
+{
+  "version": "connection-leakage-v1",
+  "question": "When standardising features for a train/test split, where should you fit the scaler and how should you transform the test set?",
+  "answer": "Fit the scaler using only the training set. Apply that same fitted scaler to both the training and test sets so held-out statistics cannot influence training.",
+  "reference": "Fit preprocessing on training data alone and reuse the fitted transformation on held-out data.",
+  "criteria": [
+    {"id": "fit", "description": "Fit the scaler on training data alone to prevent leakage.", "weight": "0.5"},
+    {"id": "apply", "description": "Transform the test set using the fitted training scaler.", "weight": "0.5"}
+  ],
+  "critical_misconceptions": {"fit-on-all": "Fit on the complete dataset before splitting."},
+  "sources": {"scikit-learn": "https://scikit-learn.org/stable/common_pitfalls.html#data-leakage"}
+}

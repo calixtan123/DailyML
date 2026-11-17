@@ -1,16 +1,60 @@
 import { BookOpen, Settings } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type { Dispatch, SetStateAction } from 'react'
 import { request } from './api'
-import { ConnectionSettings } from './ConnectionSettings'
+import { ConnectionSettings, type GradingAccount } from './ConnectionSettings'
+import { GradingSettings, type GradingAction } from './GradingSettings'
 import { QuestionBrowser } from './QuestionBrowser'
 import { TimezoneSettings } from './TimezoneSettings'
+
+type RetainedGradingAction = { account: string; action: GradingAction }
 
 function activePage() {
   return window.location.hash === '#/settings' ? 'Settings' : 'Today'
 }
 
+function SettingsPage({ retainedAction, setRetainedAction }: {
+  retainedAction: RetainedGradingAction | undefined
+  setRetainedAction: Dispatch<SetStateAction<RetainedGradingAction | undefined>>
+}) {
+  const [gradingAccount, setGradingAccount] = useState<GradingAccount>()
+
+  const updateGradingAccount = useCallback((account: GradingAccount) => {
+    setGradingAccount(account)
+    // A missing status can hide the controls without discarding the last submission.
+    if (account !== undefined) {
+      setRetainedAction(previous => previous?.account === account ? previous : undefined)
+    }
+  }, [setRetainedAction])
+
+  function updateUncertainAction(action: GradingAction | undefined) {
+    if (typeof gradingAccount !== 'string') return
+    setRetainedAction(previous => {
+      if (action) return { account: gradingAccount, action }
+      return previous?.account === gradingAccount ? undefined : previous
+    })
+  }
+
+  return (
+    <>
+      <h1>Settings</h1>
+      <ConnectionSettings request={request} onGradingAccount={updateGradingAccount} />
+      <GradingSettings
+        key={gradingAccount ?? null}
+        request={request}
+        connected={typeof gradingAccount === 'string'}
+        uncertainAction={retainedAction && retainedAction.account === gradingAccount ? retainedAction.action : undefined}
+        onUncertainActionChange={updateUncertainAction}
+      />
+      <TimezoneSettings request={request} />
+    </>
+  )
+}
+
+/** Render Today and Settings, retaining unacknowledged grading submissions across navigation. */
 export function App() {
   const [page, setPage] = useState(activePage)
+  const [retainedAction, setRetainedAction] = useState<RetainedGradingAction>()
   const content = useRef<HTMLElement>(null)
 
   useEffect(() => {
@@ -53,11 +97,7 @@ export function App() {
                 <QuestionBrowser request={request} />
               </>
             ) : (
-              <>
-                <h1>Settings</h1>
-                <ConnectionSettings request={request} />
-                <TimezoneSettings request={request} />
-              </>
+              <SettingsPage retainedAction={retainedAction} setRetainedAction={setRetainedAction} />
             )}
           </main>
         </div>

@@ -95,10 +95,13 @@ describe('ChatGPT connection controls', () => {
 
   it('exposes a remote revocation failure after local sign-out', async () => {
     const api = mockApi(connected)
-    render(<ConnectionSettings request={api.request} />)
+    const onGradingAccount = vi.fn()
+    render(<ConnectionSettings request={api.request} onGradingAccount={onGradingAccount} />)
     await screen.findByText('Connected')
+    expect(onGradingAccount).toHaveBeenLastCalledWith(connected.email)
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
     await screen.findByText('Signed out')
+    expect(onGradingAccount).toHaveBeenLastCalledWith(null)
     expect(screen.getByText(/Remote revocation could not be confirmed/)).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Manage usage and credits' }).getAttribute('href'))
       .toBe('https://chatgpt.com/settings/usage')
@@ -164,13 +167,17 @@ describe('ChatGPT connection controls', () => {
     vi.useFakeTimers()
     try {
       const api = mockApi(connected)
-      render(<ConnectionSettings request={api.request} />)
+      const onGradingAccount = vi.fn()
+      render(<ConnectionSettings request={api.request} onGradingAccount={onGradingAccount} />)
+      expect(onGradingAccount).toHaveBeenLastCalledWith(undefined)
       await act(async () => {})
       expect(screen.getByText('ChatGPT plan use authorized')).toBeTruthy()
+      expect(onGradingAccount).toHaveBeenLastCalledWith(connected.email)
 
       api.spy.mockRejectedValueOnce(new Error('The local server is unavailable.'))
       await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
       expect(screen.getByText('Status unavailable')).toBeTruthy()
+      expect(onGradingAccount).toHaveBeenLastCalledWith(undefined)
       expect(screen.queryByText('Connected')).toBeNull()
       expect(screen.queryByText('ChatGPT plan use authorized')).toBeNull()
       expect(screen.getByRole('button', { name: 'Retry status' })).toBeTruthy()
@@ -178,6 +185,7 @@ describe('ChatGPT connection controls', () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
       expect(screen.getByText('Connected')).toBeTruthy()
       expect(screen.getByText('ChatGPT plan use authorized')).toBeTruthy()
+      expect(onGradingAccount).toHaveBeenLastCalledWith(connected.email)
       expect(screen.queryByRole('alert')).toBeNull()
     } finally {
       vi.useRealTimers()

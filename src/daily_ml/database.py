@@ -106,3 +106,35 @@ class Database:
             if result.rowcount != 1:
                 raise PreferenceConflict("Settings changed. Reload them before saving.")
         return Preferences(expected_version + 1, values)
+
+    def initialize_grading(self) -> None:
+        """Create the additive request ledger without modifying existing preferences.
+
+        Raises
+        ------
+        sqlite3.Error
+            If any table cannot be created, the transaction rolls back.
+        """
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS grading_requests (
+                    id TEXT PRIMARY KEY, kind TEXT NOT NULL, model_id TEXT NOT NULL,
+                    state TEXT NOT NULL, created_at REAL NOT NULL, finished_at REAL,
+                    retry_of TEXT UNIQUE REFERENCES grading_requests(id),
+                    schema_mode TEXT NOT NULL, prompt_version TEXT NOT NULL, schema_version TEXT NOT NULL,
+                    context_json TEXT NOT NULL, feedback_json TEXT, grade INTEGER CHECK(grade BETWEEN 0 AND 3),
+                    error TEXT, response_id TEXT, usage_json TEXT, latency_ms INTEGER
+                )
+            """)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS grading_action_keys (
+                    action_key TEXT PRIMARY KEY, request_id TEXT NOT NULL REFERENCES grading_requests(id)
+                )
+            """)
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS model_attempts (
+                    request_id TEXT PRIMARY KEY REFERENCES grading_requests(id), sent_at REAL NOT NULL
+                )
+            """)
+            connection.execute("CREATE INDEX IF NOT EXISTS model_attempts_by_time ON model_attempts(sent_at)")
