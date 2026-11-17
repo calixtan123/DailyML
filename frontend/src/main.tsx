@@ -1,4 +1,6 @@
 import { BookOpen, Settings } from 'lucide-react'
+import { useState } from 'react'
+import { GradingSettings } from './GradingSettings'
 import { createRoot } from 'react-dom/client'
 import { request } from './api'
 import { ConnectionSettings } from './ConnectionSettings'
@@ -6,6 +8,7 @@ import { TimezoneSettings } from './TimezoneSettings'
 import './styles.css'
 
 function App() {
+  const [gradingAccount, setGradingAccount] = useState<string | null>(null)
   return (
     <>
       <a className="skip-link" href="#main-content">Skip to content</a>
@@ -25,7 +28,8 @@ function App() {
           <header className="topbar"><span>Daily ML Practice</span><span aria-hidden="true">/</span> Settings</header>
           <main id="main-content" tabIndex={-1}>
             <h1>Settings</h1>
-            <ConnectionSettings request={request} />
+            <ConnectionSettings request={request} onGradingAccount={setGradingAccount} />
+            <GradingSettings key={gradingAccount} request={request} connected={gradingAccount !== null} />
             <TimezoneSettings request={request} />
           </main>
         </div>
