@@ -221,3 +221,67 @@ def test_signed_out_reference_test_preserves_recovery_without_usage(client):
     reply = client.post("/api/connection/test", headers=headers, json={"model_id": "listed", "idempotency_key": "lost"})
     assert client.get("/api/requests/" + reply.json()["id"]).json()["state"] == "awaiting_access"
     assert client.get("/api/usage").json()["attempts_24h"] == 0
+
+
+def test_question_browser_routes_only_expose_public_fields(client):
+    """Read actual SQLite prompts with a session and protect assessment content."""
+    assert client.get("/api/sections").status_code == 403
+    assert client.get("/api/questions", params={"section_id": "fundamentals"}).status_code == 403
+    bootstrap(client)
+    sections = client.get("/api/sections")
+    assert sections.status_code == 200
+    assert sections.headers["cache-control"] == "no-store"
+    assert [(row["id"], row["question_count"]) for row in sections.json()] == [
+        ("fundamentals", 3), ("forests", 2), ("other-ensembles", 2),
+        ("deep-learning", 2), ("deployment", 1), ("mlops", 2),
+    ]
+    response = client.get("/api/questions", params={"section_id": "forests"})
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert {row["id"] for row in response.json()} == {"forest-mechanics", "tree-diversity"}
+    for row in response.json():
+        assert set(row) == {"id", "version", "title", "prompt", "objective", "difficulty"}
+        assert row["prompt"] and row["objective"] and row["difficulty"] == "introductory"
+    assert client.get("/api/questions", params={"section_id": "missing"}).status_code == 404
+    assert client.get("/api/questions").status_code == 422
+    assert client.get("/api/questions", params={"section_id": "https://invalid.test"}).status_code == 422
+    assert client.get("/api/sections", headers={"Origin": "https://invalid.test"}).status_code == 403
+
+
+def test_offline_validate_bank_runs_from_outside_checkout_without_assets(tmp_path, monkeypatch, capsys):
+    """Exercise the installed CLI command with sockets and UI assets unavailable."""
+    import os
+    from shutil import copytree
+
+    from daily_ml import cli
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Offline validation accessed runtime configuration, assets, or network")
+
+    with monkeypatch.context() as isolated:
+        isolated.chdir(tmp_path)
+        isolated.setenv("DML_DATA_DIR", str(tmp_path / "unused-data"))
+        isolated.setattr(socket, "socket", forbidden)
+        isolated.setattr(cli, "resolve_assets", forbidden)
+        isolated.setattr(cli, "resolve_installation", forbidden)
+        assert cli.main(["validate-bank"]) == 0
+    assert "12 questions across 6 sections" in capsys.readouterr().out
+    assert not (tmp_path / "unused-data").exists()
+
+    executable = Path(sys.executable).with_name("daily-ml")
+    environment = {**os.environ, "DML_CONFIG": str(tmp_path / "missing.toml")}
+    result = subprocess.run(
+        [executable, "validate-bank"], cwd=tmp_path, env=environment,
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "12 questions across 6 sections" in result.stdout
+
+    from importlib.resources import files
+
+    candidate = copytree(files("daily_ml").joinpath("resources"), tmp_path / "bad bank")
+    (candidate / "questions" / "generalisation.json").write_text("{", encoding="utf-8")
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["validate-bank", "--bank-dir", str(candidate)])
+    assert raised.value.code == 1
+    assert "generalisation.json" in capsys.readouterr().err

@@ -19,11 +19,30 @@ Independent task review and a fresh whole-branch review both accepted offline re
 
 Before these fixes, `.venv/bin/pytest -q tests/test_grading_jobs.py tests/test_provider.py -k 'explicit_json or reservation_contention or silently_fallback or prompted_json'` exited 1 with five failures and one pass. After the fixes, the same command passed all six selected cases. With the cancellation regressions included, `.venv/bin/pytest -q tests/test_grading_jobs.py tests/test_provider.py` passed all 25 tests in 2.93 seconds. Both green runs exited 0. The frontend and Playwright results above are from the previous verification rounds. The final fixes affected Python only.
 
+## Integration with DML-3 on 17 November 2026
+
+Resolved PR #2's conflicts against main at `c6383a9`, which includes the DML-3 question browser. The app opens Today for offline browsing. Settings includes the grading connection test and resets its model controls when the account changes or signs out. Both the grading and question-bank APIs and their regression tests remain available.
+
+| Command | Recorded outcome |
+| --- | --- |
+| `.venv/bin/pytest -q` | 196 passed in 21.96 seconds, exit 0, with temporary loopback binding permitted for the offline OAuth fixtures. |
+| `npm --prefix frontend test -- --run` | 25 passed in four files, exit 0, including app navigation, signed-out grading controls, account changes, sign-out and recovery of an unacknowledged submission. |
+| `npm --prefix frontend run typecheck` | Exit 0. |
+| `npm --prefix frontend run build` | Exit 0. |
+| `npm --prefix frontend run test:e2e` | 1 Playwright test passed, exit 0, using temporary local data and an offline OAuth stand-in. Covers Today browsing, Settings navigation, responsive layout, sign-in controls and saved timezone. |
+| `git diff --check` | Exit 0. |
+
+The two new app integration tests failed before the grading panel was connected to Settings, then passed after the integration. The first full frontend run exposed an asynchronous sign-out assertion; it now waits for the controls to disappear. The initial Python run could not bind temporary loopback ports inside the default sandbox; permitting those local sockets allowed the complete offline suite to pass. These checks used temporary data and simulated provider responses.
+
+The task review also identified a navigation recovery gap. App now retains an unacknowledged submission's complete body in memory, scoped to the verified account. Returning from Today to Settings can check that original action even if the refreshed model catalog no longer contains its model. Account changes and sign-out clear the retained action; an unavailable status hides grading controls until the account is verified again. Regression tests failed before each fix and passed afterward. This recovery covers navigation within the current App instance; a full browser reload loses the in-memory submission body.
+
+The fresh whole-branch review also required recovery during a model-catalog outage. **Check previous test** now remains available to the verified account and resends the original model, request key and retry parent. A fresh submission still requires a valid model selection. The new outage regression failed before the fix and passed afterward. The final scoped re-review accepted both requirements and code quality with no remaining blocking findings. Live acceptance remains pending.
+
 ## Live acceptance on the learner's Mac
 
 **Pending.** The recorded checks used simulated provider responses. The learner's actual account model list and a completed grading request still need verification.
 
-1. Launch the app, select **Continue with ChatGPT** and complete consent for the intended account and workspace.
+1. Launch the app. From **Today**, open **Settings**, then select **Continue with ChatGPT** and complete consent for the intended account and workspace.
 2. Open **Grading model** and choose an entry from the returned list. Record its identifier from the result and observe the starting 24-hour count.
 3. Review the fixed question and answer, then choose **Run connection test** once. Wait for the terminal result. A new outbound attempt increases the local count. Reopening Settings shows the stored result without sending another model request.
 4. Record the date, model identifier, terminal result, prompt version, schema mode, installed SDK and auth versions, and observed counts. If a provider restriction blocks completion, record the displayed recovery message and stage reached. Only the learner can authorize another attempt.

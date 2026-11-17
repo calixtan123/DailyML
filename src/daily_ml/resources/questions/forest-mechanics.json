@@ -1,0 +1,67 @@
+{
+  "id": "forest-mechanics",
+  "version": 1,
+  "domain_id": "machine-learning",
+  "section_id": "forests",
+  "concept_id": "forest-mechanics",
+  "tags": [
+    "trees",
+    "bagging"
+  ],
+  "difficulty": "introductory",
+  "question_type": "explanation",
+  "title": "How random forests work",
+  "prompt": "Explain how a typical random forest trains its trees and combines their predictions. Use either classification or regression for your example.",
+  "objective": "Describe random forest training and how the individual predictions form a forest prediction.",
+  "expected_scope": "Cover row sampling, feature sampling and prediction aggregation for one task.",
+  "expected_answer_words": [
+    50,
+    100
+  ],
+  "hint": "Think about what changes between trees and what changes between splits.",
+  "reference_explanation": "In a standard bootstrap forest, each tree learns from a sample of training rows drawn with replacement. At each split, the algorithm considers a random subset of features. The forest combines the trees’ outputs. For regression it averages their predictions. Classifiers can combine votes or class probabilities, depending on the implementation. For example, scikit-learn chooses the class with the highest mean tree probability.",
+  "criteria": [
+    {
+      "id": "bootstrap-rows",
+      "description": "Describes drawing training rows with replacement for individual trees.",
+      "weight": "0.35"
+    },
+    {
+      "id": "sample-features",
+      "description": "Describes selecting candidate features randomly at each split.",
+      "weight": "0.35"
+    },
+    {
+      "id": "combine-predictions",
+      "description": "Describes a valid prediction aggregation for the chosen task.",
+      "weight": "0.30"
+    }
+  ],
+  "critical_misconceptions": [
+    "Saying each tree is trained to correct the previous tree’s mistakes."
+  ],
+  "sources": [
+    {
+      "id": "sklearn-forests",
+      "title": "scikit-learn — Random forests",
+      "url": "https://scikit-learn.org/stable/modules/ensemble.html#random-forests",
+      "reviewed_on": "2026-11-17",
+      "supports": [
+        "objective",
+        "bootstrap-rows",
+        "sample-features",
+        "combine-predictions"
+      ]
+    },
+    {
+      "id": "breiman-forests",
+      "title": "Leo Breiman — Random Forests, sections 1–2 and 4",
+      "url": "https://www.stat.berkeley.edu/~breiman/randomforest2001.pdf",
+      "reviewed_on": "2026-11-17",
+      "supports": [
+        "combine-predictions"
+      ]
+    }
+  ],
+  "retired": false
+}

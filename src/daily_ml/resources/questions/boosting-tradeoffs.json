@@ -1,0 +1,58 @@
+{
+  "id": "boosting-tradeoffs",
+  "version": 1,
+  "domain_id": "machine-learning",
+  "section_id": "other-ensembles",
+  "concept_id": "boosting-tradeoffs",
+  "tags": [
+    "regularisation",
+    "evaluation"
+  ],
+  "difficulty": "introductory",
+  "question_type": "scenario",
+  "title": "Boosting trade-offs",
+  "prompt": "A gradient-boosted tree model’s training loss falls with each extra tree, but the validation loss starts rising. What trade-off does that show, and how would you choose the number of boosting rounds?",
+  "objective": "Identify overfitting during boosting and use validation to control model complexity.",
+  "expected_scope": "Interpret the two loss curves, explain why another tree may hurt and propose a validation-based stopping rule.",
+  "expected_answer_words": [
+    50,
+    100
+  ],
+  "hint": "Which loss tells you about data that did not fit the model?",
+  "reference_explanation": "Extra stages can improve the fit to training data while making the model predict worse on unseen data. The rising validation loss is evidence of that trade-off. Track validation loss by stage, then select a stage near its minimum or use early stopping with patience. Learning rate and tree depth also affect how quickly the model grows in complexity.",
+  "criteria": [
+    {
+      "id": "read-validation-gap",
+      "description": "Interprets falling training loss and rising validation loss as evidence of overfitting.",
+      "weight": "0.35"
+    },
+    {
+      "id": "complexity-tradeoff",
+      "description": "Connects extra boosting stages to greater fitting capacity and a risk to generalisation.",
+      "weight": "0.30"
+    },
+    {
+      "id": "validation-stopping",
+      "description": "Selects the stage count with validation loss or describes a sound early stopping approach.",
+      "weight": "0.35"
+    }
+  ],
+  "critical_misconceptions": [
+    "Continuing to add trees solely because the training loss decreases."
+  ],
+  "sources": [
+    {
+      "id": "sklearn-boosting",
+      "title": "scikit-learn — Gradient-boosted trees",
+      "url": "https://scikit-learn.org/stable/modules/ensemble.html#gradient-boosted-trees",
+      "reviewed_on": "2026-11-17",
+      "supports": [
+        "objective",
+        "read-validation-gap",
+        "complexity-tradeoff",
+        "validation-stopping"
+      ]
+    }
+  ],
+  "retired": false
+}

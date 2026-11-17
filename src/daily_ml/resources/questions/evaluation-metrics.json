@@ -1,0 +1,58 @@
+{
+  "id": "evaluation-metrics",
+  "version": 1,
+  "domain_id": "machine-learning",
+  "section_id": "fundamentals",
+  "concept_id": "evaluation-metrics",
+  "tags": [
+    "classification",
+    "class-imbalance"
+  ],
+  "difficulty": "introductory",
+  "question_type": "scenario",
+  "title": "Evaluation metrics",
+  "prompt": "Only 2% of emails in a test set are spam. A filter that always predicts ‘not spam’ is 98% accurate. Why is that score misleading, and what do precision and recall tell you for the spam class?",
+  "objective": "Interpret accuracy, precision and recall for an imbalanced classification problem.",
+  "expected_scope": "Explain the high accuracy and define the two spam-class metrics. No calculation of precision for the all-negative filter is needed.",
+  "expected_answer_words": [
+    50,
+    100
+  ],
+  "hint": "Compare the set of flagged emails with the set of actual spam emails.",
+  "reference_explanation": "The filter gets all legitimate emails right while catching none of the spam. Spam precision is the share of flagged emails that are actually spam and reflects false alarms. Spam recall is the share of actual spam that is flagged and reflects missed spam. This filter has zero spam recall, and ordinary spam precision is undefined because it never flags an email.",
+  "criteria": [
+    {
+      "id": "accuracy-baseline",
+      "description": "Explains why predicting the majority class achieves high accuracy while missing every spam email.",
+      "weight": "0.30"
+    },
+    {
+      "id": "precision",
+      "description": "Defines spam precision using flagged emails as the denominator.",
+      "weight": "0.35"
+    },
+    {
+      "id": "recall",
+      "description": "Defines spam recall using actual spam emails as the denominator.",
+      "weight": "0.35"
+    }
+  ],
+  "critical_misconceptions": [
+    "Interpreting 98% overall accuracy as catching 98% of the spam."
+  ],
+  "sources": [
+    {
+      "id": "sklearn-metrics",
+      "title": "scikit-learn — Classification metrics",
+      "url": "https://scikit-learn.org/stable/modules/model_evaluation.html#classification-metrics",
+      "reviewed_on": "2026-11-17",
+      "supports": [
+        "objective",
+        "accuracy-baseline",
+        "precision",
+        "recall"
+      ]
+    }
+  ],
+  "retired": false
+}

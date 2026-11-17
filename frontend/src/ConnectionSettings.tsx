@@ -25,12 +25,19 @@ type Status = {
   requires_consent: boolean
 }
 
+/** Verified grading account, null for no access, or undefined when status is unavailable. */
+export type GradingAccount = string | null | undefined
+
 const CONNECTION = '/api/connection'
 const SIGN_IN_POLL_MS = 450
 const STATUS_POLL_MS = 15_000
 const LAUNCH_PATH = /^\/api\/connection\/authorize\/[A-Za-z0-9_-]+$/
 
-export function ConnectionSettings({ request, onGradingAccount }: { request: LocalRequest; onGradingAccount?: (account: string | null) => void }) {
+/** Show and manage the ChatGPT connection, and report the verified grading account. */
+export function ConnectionSettings({ request, onGradingAccount }: {
+  request: LocalRequest
+  onGradingAccount?: (account: GradingAccount) => void
+}) {
   const [lastStatus, setLastStatus] = useState<Status>()
   const [busy, setBusy] = useState(false)
   const [statusError, setStatusError] = useState<string>()
@@ -40,7 +47,7 @@ export function ConnectionSettings({ request, onGradingAccount }: { request: Loc
 
   const phase = lastStatus?.state
   const status = statusError === undefined ? lastStatus : undefined
-  const gradingAccount = status?.plan_authorized && !status.reauthorization_required ? status.email : null
+  const gradingAccount = status && (status.plan_authorized && !status.reauthorization_required ? status.email : null)
   useEffect(() => { onGradingAccount?.(gradingAccount) }, [onGradingAccount, gradingAccount])
   useEffect(() => {
     if (busy) return

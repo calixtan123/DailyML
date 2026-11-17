@@ -17,7 +17,8 @@ type Feedback = {
 } | { status: 'needs_clarification'; explanation: string }
 type Job = { id: string; model_id: string; state: string; grade: number | null; error: string | null; reference: Reference
   message: string | null; feedback: Feedback | null }
-type Action = { model_id: string; idempotency_key: string; retry_of?: string }
+/** Request body retained until the server acknowledges a test submission. */
+export type GradingAction = { model_id: string; idempotency_key: string; retry_of?: string }
 const TEST = '/api/connection/test'
 const PENDING = new Set(['queued', 'preparing', 'in_flight'])
 const POLL_MS = 500
@@ -52,20 +53,28 @@ function Result({ job }: { job: Job }) {
   </div>
 }
 
-export function GradingSettings({ request, connected }: { request: LocalRequest; connected: boolean }) {
+/** Run the grading connection test and display the saved result. */
+export function GradingSettings({ request, connected, uncertainAction, onUncertainActionChange }: {
+  request: LocalRequest
+  connected: boolean
+  uncertainAction: GradingAction | undefined
+  onUncertainActionChange: (action: GradingAction | undefined) => void
+}) {
   const [catalog, setCatalog] = useState<Catalog>()
   const [reference, setReference] = useState<Reference>()
   const [job, setJob] = useState<Job | null>(null)
   const [count, setCount] = useState<number>()
   const [error, setError] = useState('')
+  const [catalogError, setCatalogError] = useState('')
   const [revision, setRevision] = useState(0)
   const [busy, setBusy] = useState(false)
-  const uncertain = useRef<Action | undefined>(undefined)
   const action = useRef<AbortController | undefined>(undefined)
 
   const report = (failure: unknown) => setError(failure instanceof Error ? failure.message : 'Could not load the connection test.')
   const pending = PENDING.has(job?.state ?? '')
-  const selected = catalog?.models.some(model => model.slug === catalog.selected) ? catalog.selected : ''
+  const selected = catalog?.models.find(model => model.slug === catalog.selected)?.slug ?? ''
+  const canRunTest = connected && !!reference && !busy && !pending && !!(uncertainAction || selected)
+  const visibleError = error || catalogError
 
   useEffect(() => () => action.current?.abort(), [])
 
@@ -73,6 +82,7 @@ export function GradingSettings({ request, connected }: { request: LocalRequest;
     const controller = new AbortController()
     const options = { signal: controller.signal }
     setError('')
+    setCatalogError('')
     setReference(undefined)
     setCatalog(undefined)
     void request<{reference: Reference; latest: Job | null}>(TEST, options).then(reply => {
@@ -81,7 +91,11 @@ export function GradingSettings({ request, connected }: { request: LocalRequest;
     if (connected) {
       void request<Catalog>('/api/connection/models', options).then(reply => {
         if (!controller.signal.aborted) setCatalog(reply)
-      }).catch(failure => { if (!controller.signal.aborted) report(failure) })
+      }).catch(failure => {
+        if (!controller.signal.aborted) {
+          setCatalogError(failure instanceof Error ? failure.message : 'Could not load grading models.')
+        }
+      })
     }
     return () => controller.abort()
   }, [request, connected, revision])
@@ -130,18 +144,21 @@ export function GradingSettings({ request, connected }: { request: LocalRequest;
   const retry = job?.error && job.model_id === selected ? job : null
   const preview = retry?.reference ?? (pending ? job?.reference : reference)
   async function runTest() {
-    if (!selected || busy || pending) return
+    if (!canRunTest) return
     setBusy(true)
     setError('')
     const controller = new AbortController()
     action.current = controller
-    const body = uncertain.current ?? { idempotency_key: crypto.randomUUID(), model_id: selected,
+    const body = uncertainAction ?? { idempotency_key: crypto.randomUUID(), model_id: selected,
       ...(retry && { retry_of: retry.id }) }
-    uncertain.current = body
+    onUncertainActionChange(body)
     try {
       const next = await request<Job>(TEST, { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body), signal: controller.signal })
-      if (!controller.signal.aborted) { uncertain.current = undefined; setJob(next) }
+      if (!controller.signal.aborted) {
+        onUncertainActionChange(undefined)
+        setJob(next)
+      }
     } catch (failure) { if (!controller.signal.aborted) report(failure) }
     finally { if (!controller.signal.aborted) setBusy(false) }
   }
@@ -154,25 +171,25 @@ export function GradingSettings({ request, connected }: { request: LocalRequest;
       <dt>Reference answer</dt><dd>{preview.answer}</dd>
     </dl>}
     {!connected && <p>Connect ChatGPT to choose a model and run the test.</p>}
-    {connected && catalog && <div className="settings-row">
-      <div><label htmlFor="grading-model">Grading model</label>
+    {connected && (catalog || uncertainAction) && <div className="settings-row">
+      {catalog && <div><label htmlFor="grading-model">Grading model</label>
         {catalog.overridden && <p className="muted">Set by {catalog.source} configuration.</p>}
-      </div>
+      </div>}
       <div className="actions">
-        <select id="grading-model" value={selected ?? ''} disabled={busy || pending || catalog.overridden || !!uncertain.current}
+        {catalog && <select id="grading-model" value={selected} disabled={busy || pending || catalog.overridden || !!uncertainAction}
           onChange={event => void selectModel(event.target.value)}>
           <option value="" disabled>{catalog.models.length ? 'Choose a model' : 'No models available'}</option>
           {catalog.models.map(model => <option key={model.slug} value={model.slug}>{model.display_name}</option>)}
-        </select>
-        <button className="primary" onClick={() => void runTest()} disabled={!reference || !selected || busy || pending}>
-          {uncertain.current ? 'Check previous test' : retry?.error === 'schema_unsupported' ? 'Retry in JSON mode' :
+        </select>}
+        <button className="primary" onClick={() => void runTest()} disabled={!canRunTest}>
+          {uncertainAction ? 'Check previous test' : retry?.error === 'schema_unsupported' ? 'Retry in JSON mode' :
             retry ? 'Retry connection test' : 'Run connection test'}
         </button>
       </div>
     </div>}
     {job && <Result job={job} />}
     <p className="muted" aria-live="polite">Model attempts in the last 24 hours: {count ?? 'unavailable'}</p>
-    {error && <div><p role="alert" className="error">{error}</p>
+    {visibleError && <div><p role="alert" className="error">{visibleError}</p>
       <button disabled={busy} onClick={() => setRevision(r => r + 1)}>Reload connection test</button></div>}
   </section>
 }

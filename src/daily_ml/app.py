@@ -6,12 +6,16 @@ import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
+from .bank import (
+    ID_PATTERN, QuestionPrompt, SectionNotFound, SectionSummary, import_bank, list_questions,
+    list_sections, validate_bank,
+)
 from .config import ConfigError, Settings, save_user_settings
 from .connection import Connection, ConnectionError, ConnectionStatus, SignInStart
 from .database import Database, PreferenceConflict, Preferences
@@ -106,12 +110,14 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
     Returns
     -------
     FastAPI
-        App with protected Settings and connection routes.
+        App with protected content, Settings and connection routes.
     """
     if not 1 <= port <= 65535:
         raise LaunchError("The server must have an allocated local port.")
     assets = resolve_assets(assets_dir)
+    bank = validate_bank()
     database = Database(settings.data_dir)
+    import_bank(database, bank)
     host = f"127.0.0.1:{port}"
     origin = f"http://{host}"
     cookie_name = f"daily_ml_session_{port}"
@@ -168,9 +174,11 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         return _error(409, str(error))
 
     @app.exception_handler(sqlite3.Error)
-    async def database_failure(_request: Request, _error_detail: sqlite3.Error):
+    async def database_failure(request: Request, _error_detail: sqlite3.Error):
         """Keep local database details out of the response and logs."""
-        logger.info("Local preferences database operation failed")
+        logger.info("Local database operation failed")
+        if request.url.path in {"/api/sections", "/api/questions"}:
+            return _error(503, "Could not read the question bank. Try again.")
         return _error(503, "Could not access local settings. Try again.")
 
     @app.exception_handler(PreferenceConflict)
@@ -184,13 +192,15 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         return _error(422, str(error))
 
     @app.exception_handler(RequestValidationError)
-    async def invalid_request(_request: Request, _error_detail: RequestValidationError):
+    async def invalid_request(request: Request, _error_detail: RequestValidationError):
         """Do not echo input in request validation responses."""
+        if request.url.path == "/api/questions":
+            return _error(422, "Choose a valid section.")
         return _error(422, "The settings request was invalid.")
 
     @app.get("/")
     def index() -> FileResponse:
-        """Serve the installed Settings entrypoint."""
+        """Serve the installed application entrypoint."""
         return FileResponse(assets / "index.html", headers={"Cache-Control": "no-store"})
 
     @app.get("/api/session")
@@ -198,6 +208,43 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         """Bootstrap same-origin request protection for an open browser tab."""
         response.set_cookie(cookie_name, session, httponly=True, samesite="strict")
         return {"csrf_token": csrf}
+
+    @app.exception_handler(SectionNotFound)
+    async def section_missing(_request: Request, _error_detail: SectionNotFound):
+        """Return a safe error when the selected section is unavailable."""
+        return _error(404, "That section is unavailable. Choose another section.")
+
+    @app.get("/api/sections")
+    def browse_sections() -> list[SectionSummary]:
+        """List saved curriculum sections and active question counts.
+
+        Returns
+        -------
+        list of SectionSummary
+            Ordered section summaries.
+        """
+        return list_sections(database)
+
+    @app.get("/api/questions")
+    def browse_questions(section_id: str = Query(pattern=ID_PATTERN, max_length=64)) -> list[QuestionPrompt]:
+        """List active prompts with learner-visible fields only.
+
+        Parameters
+        ----------
+        section_id : str
+            Stable curriculum section ID.
+
+        Returns
+        -------
+        list of QuestionPrompt
+            Prompt, objective and display metadata for each active question.
+
+        Raises
+        ------
+        SectionNotFound
+            If the requested section is unknown.
+        """
+        return list_questions(database, section_id)
 
     @app.get("/api/connection")
     def connection_status(request: Request) -> ConnectionStatus:

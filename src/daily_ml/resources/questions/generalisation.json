@@ -1,0 +1,66 @@
+{
+  "id": "generalisation",
+  "version": 1,
+  "domain_id": "machine-learning",
+  "section_id": "fundamentals",
+  "concept_id": "generalisation",
+  "tags": [
+    "evaluation",
+    "overfitting"
+  ],
+  "difficulty": "introductory",
+  "question_type": "scenario",
+  "title": "Generalisation",
+  "prompt": "A bike rental model has a small training error and a much larger error on held-out rentals from the same population. What does the gap suggest, and how would you estimate performance on new rentals?",
+  "objective": "Explain generalisation and interpret a gap between training and held-out performance.",
+  "expected_scope": "Define generalisation, interpret the gap and describe an appropriate evaluation split.",
+  "expected_answer_words": [
+    50,
+    100
+  ],
+  "hint": "Which rentals has the model already had the chance to learn from?",
+  "reference_explanation": "Generalisation is how well the model predicts new examples from the intended population. A much larger held-out error suggests the model may fit details that do not carry over from training. Evaluate on examples held out from fitting and tuning, using a split that reflects how the model will be used. Training error measures fit to known examples.",
+  "criteria": [
+    {
+      "id": "unseen-performance",
+      "description": "Defines generalisation as performance on unseen examples from the intended population.",
+      "weight": "0.35"
+    },
+    {
+      "id": "interpret-gap",
+      "description": "Recognises that low training and higher held-out error suggests overfitting.",
+      "weight": "0.30"
+    },
+    {
+      "id": "held-out-evaluation",
+      "description": "Evaluates on data held out from fitting and tuning.",
+      "weight": "0.35"
+    }
+  ],
+  "critical_misconceptions": [
+    "Treating the training error as sufficient evidence of performance on new examples."
+  ],
+  "sources": [
+    {
+      "id": "sklearn-overfitting",
+      "title": "scikit-learn — Underfitting vs. Overfitting",
+      "url": "https://scikit-learn.org/stable/auto_examples/model_selection/plot_underfitting_overfitting.html",
+      "reviewed_on": "2026-11-17",
+      "supports": [
+        "objective",
+        "unseen-performance",
+        "interpret-gap"
+      ]
+    },
+    {
+      "id": "sklearn-leakage",
+      "title": "scikit-learn — Data leakage",
+      "url": "https://scikit-learn.org/stable/common_pitfalls.html#data-leakage",
+      "reviewed_on": "2026-11-17",
+      "supports": [
+        "held-out-evaluation"
+      ]
+    }
+  ],
+  "retired": false
+}

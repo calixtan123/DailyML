@@ -1,0 +1,58 @@
+{
+  "id": "deep-learning-overfitting",
+  "version": 1,
+  "domain_id": "machine-learning",
+  "section_id": "deep-learning",
+  "concept_id": "deep-learning-overfitting",
+  "tags": [
+    "neural-networks",
+    "regularisation"
+  ],
+  "difficulty": "introductory",
+  "question_type": "scenario",
+  "title": "Overfitting in neural networks",
+  "prompt": "As a flower image classifier trains, its training loss keeps falling but its validation loss rises after epoch 8. What is likely happening, and what are two ways to respond?",
+  "objective": "Recognise overfitting in learning curves and explain two practical mitigations.",
+  "expected_scope": "Diagnose the curve pattern and explain two remedies such as early stopping, a smaller model or regularisation.",
+  "expected_answer_words": [
+    50,
+    100
+  ],
+  "hint": "Consider changing when training stops or how much detail the model can fit.",
+  "reference_explanation": "The network is likely overfitting, because extra training improves its fit to training images while worsening performance on held-out images. Early stopping can restore the weights from an epoch with good validation performance. A smaller network, weight regularisation or dropout can reduce its ability to rely on training-specific patterns. Check the revised model on held-out data.",
+  "criteria": [
+    {
+      "id": "recognise-overfitting",
+      "description": "Explains the loss gap as evidence of fitting training data at the expense of validation performance.",
+      "weight": "0.40"
+    },
+    {
+      "id": "first-mitigation",
+      "description": "Names a sensible mitigation and explains how it addresses overfitting.",
+      "weight": "0.30"
+    },
+    {
+      "id": "second-mitigation",
+      "description": "Names and explains a second distinct mitigation.",
+      "weight": "0.30"
+    }
+  ],
+  "critical_misconceptions": [
+    "Claiming that the model is underfitting solely because the validation loss is rising."
+  ],
+  "sources": [
+    {
+      "id": "tensorflow-overfitting",
+      "title": "TensorFlow — Overfit and underfit",
+      "url": "https://www.tensorflow.org/tutorials/keras/overfit_and_underfit",
+      "reviewed_on": "2026-11-17",
+      "supports": [
+        "objective",
+        "recognise-overfitting",
+        "first-mitigation",
+        "second-mitigation"
+      ]
+    }
+  ],
+  "retired": false
+}

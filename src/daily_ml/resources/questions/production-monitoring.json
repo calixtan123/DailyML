@@ -1,0 +1,66 @@
+{
+  "id": "production-monitoring",
+  "version": 1,
+  "domain_id": "mlops",
+  "section_id": "mlops",
+  "concept_id": "production-monitoring",
+  "tags": [
+    "drift",
+    "evaluation"
+  ],
+  "difficulty": "introductory",
+  "question_type": "scenario",
+  "title": "Production monitoring",
+  "prompt": "A product-return model is running in production, but the true outcomes arrive weeks later. What could you monitor immediately, and how would you check later whether predictive performance has changed?",
+  "objective": "Distinguish early production signals from direct performance measurement after outcomes arrive.",
+  "expected_scope": "Name an immediate signal and baseline, then describe a later labelled evaluation.",
+  "expected_answer_words": [
+    50,
+    100
+  ],
+  "hint": "Which measurements are possible before you know whether the predicted event happened?",
+  "reference_explanation": "Compare input distributions or missing-value rates with a reference period to flag changes. A shift is a signal to investigate, because a changed input mix can leave accuracy unchanged. When outcomes arrive, match them to the original predictions and compare a relevant metric, such as return-class recall, to its baseline over a comparable window.",
+  "criteria": [
+    {
+      "id": "early-signal",
+      "description": "Names a measurable immediate signal and an appropriate reference baseline.",
+      "weight": "0.35"
+    },
+    {
+      "id": "drift-limitation",
+      "description": "Explains why a distribution change alone does not establish worse predictions.",
+      "weight": "0.25"
+    },
+    {
+      "id": "labelled-performance",
+      "description": "Explains using later outcomes matched to past predictions to calculate and compare a relevant quality metric.",
+      "weight": "0.40"
+    }
+  ],
+  "critical_misconceptions": [
+    "Concluding that prediction accuracy has dropped based solely on a change in input distributions."
+  ],
+  "sources": [
+    {
+      "id": "vertex-monitoring",
+      "title": "Google Cloud — Introduction to Model Monitoring",
+      "url": "https://cloud.google.com/vertex-ai/docs/model-monitoring/overview",
+      "reviewed_on": "2026-11-17",
+      "supports": [
+        "objective",
+        "early-signal",
+        "drift-limitation"
+      ]
+    },
+    {
+      "id": "google-mlops",
+      "title": "Google Cloud Architecture Center — MLOps continuous delivery and automation pipelines",
+      "url": "https://docs.cloud.google.com/architecture/mlops-continuous-delivery-and-automation-pipelines-in-machine-learning",
+      "reviewed_on": "2026-11-17",
+      "supports": [
+        "labelled-performance"
+      ]
+    }
+  ],
+  "retired": false
+}

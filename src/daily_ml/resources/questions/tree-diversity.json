@@ -1,0 +1,58 @@
+{
+  "id": "tree-diversity",
+  "version": 1,
+  "domain_id": "machine-learning",
+  "section_id": "forests",
+  "concept_id": "tree-diversity",
+  "tags": [
+    "trees",
+    "variance"
+  ],
+  "difficulty": "introductory",
+  "question_type": "explanation",
+  "title": "Why tree diversity helps",
+  "prompt": "Two regression forests use the same number of trees. One has trees that make similar errors on new examples. In the other, the errors are less correlated and the trees are equally accurate individually. Which forest benefits more from averaging, and how can randomisation help?",
+  "objective": "Explain how less-correlated tree errors can improve the benefit of averaging.",
+  "expected_scope": "Explain the role of correlated errors, averaging and one way to create diversity.",
+  "expected_answer_words": [
+    50,
+    100
+  ],
+  "hint": "Imagine averaging errors that all point in the same direction.",
+  "reference_explanation": "The forest with less-correlated errors can benefit more from averaging. Variation from one tree is partly offset by variation in others. If errors move together, averaging leaves more of that shared variation. Giving trees different bootstrap samples or considering different feature subsets at splits can make their predictions less dependent. Individual trees still need useful predictive signal.",
+  "criteria": [
+    {
+      "id": "shared-errors",
+      "description": "Explains why highly correlated errors tend to survive averaging.",
+      "weight": "0.35"
+    },
+    {
+      "id": "variance-reduction",
+      "description": "Identifies the less-correlated forest and explains why averaging can reduce variance.",
+      "weight": "0.40"
+    },
+    {
+      "id": "randomisation",
+      "description": "Names bootstrap row samples or random split features as a source of tree diversity.",
+      "weight": "0.25"
+    }
+  ],
+  "critical_misconceptions": [
+    "Claiming that averaging identical trees reduces their shared error."
+  ],
+  "sources": [
+    {
+      "id": "sklearn-forests",
+      "title": "scikit-learn — Random forests",
+      "url": "https://scikit-learn.org/stable/modules/ensemble.html#random-forests",
+      "reviewed_on": "2026-11-17",
+      "supports": [
+        "objective",
+        "shared-errors",
+        "variance-reduction",
+        "randomisation"
+      ]
+    }
+  ],
+  "retired": false
+}

@@ -1,0 +1,58 @@
+{
+  "id": "backpropagation",
+  "version": 1,
+  "domain_id": "machine-learning",
+  "section_id": "deep-learning",
+  "concept_id": "backpropagation",
+  "tags": [
+    "gradients",
+    "neural-networks"
+  ],
+  "difficulty": "introductory",
+  "question_type": "explanation",
+  "title": "Backpropagation",
+  "prompt": "A neural network has made a prediction and computed a loss. Explain what backpropagation computes, how it gets information to earlier layers and what the optimiser does afterwards.",
+  "objective": "Explain how backpropagation computes gradients and how an optimiser uses them.",
+  "expected_scope": "Describe the role of the loss, the chain rule and the parameter update without deriving equations.",
+  "expected_answer_words": [
+    50,
+    100
+  ],
+  "hint": "Separate finding a slope from taking a step.",
+  "reference_explanation": "Backpropagation computes derivatives of the loss with respect to trainable parameters. It starts at the loss and applies the chain rule backwards through the operations used in the forward pass, so layers closer to the input also receive gradients. The optimiser then uses those gradients to update parameters, for example by stepping in the negative gradient direction with plain gradient descent.",
+  "criteria": [
+    {
+      "id": "loss-gradients",
+      "description": "Identifies derivatives of the loss with respect to trainable parameters as the output.",
+      "weight": "0.35"
+    },
+    {
+      "id": "chain-rule",
+      "description": "Explains that the chain rule propagates gradient information backward through the computation.",
+      "weight": "0.40"
+    },
+    {
+      "id": "optimiser-update",
+      "description": "Distinguishes computing gradients from updating parameters with the optimiser.",
+      "weight": "0.25"
+    }
+  ],
+  "critical_misconceptions": [
+    "Saying the backward pass itself changes the parameters or only computes gradients for the last layer."
+  ],
+  "sources": [
+    {
+      "id": "pytorch-autograd",
+      "title": "PyTorch — Automatic Differentiation with torch.autograd",
+      "url": "https://docs.pytorch.org/tutorials/beginner/basics/autogradqs_tutorial.html",
+      "reviewed_on": "2026-11-17",
+      "supports": [
+        "objective",
+        "loss-gradients",
+        "chain-rule",
+        "optimiser-update"
+      ]
+    }
+  ],
+  "retired": false
+}
