@@ -1,0 +1,100 @@
+:root {
+  color-scheme: dark;
+  --canvas: #000000;
+  --sidebar: #121214;
+  --surface: #161618;
+  --input: #0c0c0e;
+  --ink: #f5f5f7;
+  --muted: #a3a3ad;
+  --line: #2b2b2f;
+  --input-border: #72727a;
+  --accent: #8eb2ea;
+  --on-accent: #0b1018;
+  --warning: #e8c47a;
+  --error: #ffb4ab;
+  font: 14px/1.55 -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+  background: var(--canvas);
+  color: var(--ink);
+}
+
+* { box-sizing: border-box; }
+body, h1, h2, h3, p, ul { margin: 0; }
+#root { container-type: inline-size; }
+a { color: var(--accent); text-underline-offset: 3px; }
+svg { flex: none; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+::selection { background: var(--accent); color: var(--on-accent); }
+
+.skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  transform: translateY(-150%);
+  z-index: 1;
+  background: var(--surface);
+  padding: 12px;
+}
+.skip-link:focus { transform: none; }
+
+.app { min-height: 100vh; display: grid; grid-template-columns: 236px minmax(0, 1fr); }
+.sidebar { background: var(--sidebar); border-right: 1px solid var(--line); padding: 34px 16px; }
+.brand { display: flex; align-items: center; gap: 11px; padding: 0 9px; font-size: 19px; font-weight: 650; line-height: 1.2; }
+.logo { width: 38px; height: 38px; flex: none; display: grid; place-items: center; background: var(--accent); color: var(--on-accent); border-radius: 12px; }
+nav { margin-top: 30px; }
+.nav-link { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 12px; border-radius: 8px; background: #262629; color: var(--ink); text-decoration: none; }
+.nav-link:hover { background: #323236; }
+
+.topbar { display: flex; align-items: center; gap: 9px; min-height: 54px; padding: 0 28px; border-bottom: 1px solid var(--line); background: #18181bc7; font-weight: 550; }
+.topbar span { color: var(--muted); }
+main { margin: 0 auto; max-width: 1280px; padding: 28px; }
+h1 { font-size: 28px; font-weight: 650; letter-spacing: -0.5px; margin-bottom: 22px; }
+h2 { font-size: 17px; font-weight: 650; margin-bottom: 12px; }
+h3 { font-size: 14px; margin-bottom: 6px; }
+.panel { background: var(--surface); padding: 22px; border: 1px solid var(--line); border-radius: 12px; margin-bottom: 24px; }
+.settings-row { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; justify-content: space-between; }
+.connection-row { margin-bottom: 18px; }
+.settings-row > div:first-child { min-width: 0; overflow-wrap: anywhere; }
+.actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0; }
+.state, label { font-weight: 650; }
+.authorized { color: var(--accent); }
+.muted { color: var(--muted); }
+.error { color: var(--error); margin-top: 8px; }
+.notice { color: var(--warning); margin-top: 8px; }
+.privacy { border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); }
+.privacy h3 { color: var(--ink); }
+.privacy p { max-width: 72ch; margin-bottom: 8px; }
+.control-links { display: flex; flex-wrap: wrap; column-gap: 18px; padding: 0; list-style: none; }
+.control-links a { min-height: 44px; display: inline-flex; gap: 5px; align-items: center; }
+
+button, .button, input {
+  max-width: 100%;
+  min-height: 44px;
+  padding: 0 13px;
+  border: 1px solid var(--input-border);
+  border-radius: 8px;
+  background: #262629;
+  color: var(--ink);
+  font: inherit;
+}
+button, .button { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; cursor: pointer; text-decoration: none; }
+button:hover:not(:disabled), .button:hover { background: #35353a; }
+button:disabled { opacity: 0.55; cursor: default; }
+.primary { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
+.primary:hover:not(:disabled) { background: #a1c1f2; }
+.chatgpt-button { background: #fff; color: #000; border-color: #fff; }
+.chatgpt-button:hover:not(:disabled) { background: #eaeaea; }
+input { background: var(--input); min-width: 0; width: 180px; }
+
+@container (max-width: 680px) {
+  .app { display: block; }
+  .sidebar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; border-right: none; border-bottom: 1px solid var(--line); padding: 12px 16px; }
+  .brand { font-size: 16px; padding: 0; }
+  .logo { width: 32px; height: 32px; border-radius: 9px; }
+  nav { margin-top: 0; }
+  .topbar { display: none; }
+  main { padding: 20px 16px; }
+  .panel { padding: 16px; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .topbar { background: #18181b; }
+}

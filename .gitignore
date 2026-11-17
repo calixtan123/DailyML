@@ -1,0 +1,16 @@
+/.venv/
+/dist/
+/frontend/node_modules/
+/frontend/playwright-report/
+/frontend/test-results/
+/src/daily_ml/web/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.env
+.env.*
+/config.toml
+*.sqlite*
+*.log*
+.server.lock
+credentials/
