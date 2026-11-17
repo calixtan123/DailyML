@@ -1,0 +1,58 @@
+{
+  "id": "bagging-vs-boosting",
+  "version": 1,
+  "domain_id": "machine-learning",
+  "section_id": "other-ensembles",
+  "concept_id": "bagging-vs-boosting",
+  "tags": [
+    "trees",
+    "ensemble-learning"
+  ],
+  "difficulty": "introductory",
+  "question_type": "comparison",
+  "title": "Bagging versus boosting",
+  "prompt": "How does training several decision trees with bagging differ from training them with gradient boosting? Explain the role of the earlier trees in each approach.",
+  "objective": "Distinguish independent bootstrap fitting from sequential corrections to an ensemble.",
+  "expected_scope": "Compare how trees are fitted and how their predictions are combined.",
+  "expected_answer_words": [
+    50,
+    100
+  ],
+  "hint": "Could the second tree start training before the first tree has made any predictions?",
+  "reference_explanation": "Bagging fits trees independently on bootstrap samples and aggregates their predictions, such as by averaging in regression. Gradient boosting builds an additive model in sequence. Each new tree is fitted to improve the current ensemble under the loss. With squared-error regression, it fits the residuals of the current prediction, and its scaled prediction is added to the ensemble.",
+  "criteria": [
+    {
+      "id": "independent-fitting",
+      "description": "Explains independent fitting on bootstrap samples for bagging.",
+      "weight": "0.35"
+    },
+    {
+      "id": "sequential-correction",
+      "description": "Explains that a boosting stage uses the current model’s errors or loss gradients.",
+      "weight": "0.40"
+    },
+    {
+      "id": "combine-models",
+      "description": "Distinguishes aggregating bagged predictions from adding the contribution of each boosting stage.",
+      "weight": "0.25"
+    }
+  ],
+  "critical_misconceptions": [
+    "Claiming that gradient boosting trains each stage independently of the previous stages."
+  ],
+  "sources": [
+    {
+      "id": "sklearn-ensembles",
+      "title": "scikit-learn — Ensembles",
+      "url": "https://scikit-learn.org/stable/modules/ensemble.html",
+      "reviewed_on": "2026-11-17",
+      "supports": [
+        "objective",
+        "independent-fitting",
+        "sequential-correction",
+        "combine-models"
+      ]
+    }
+  ],
+  "retired": false
+}

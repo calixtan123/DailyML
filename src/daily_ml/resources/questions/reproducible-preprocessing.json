@@ -1,0 +1,66 @@
+{
+  "id": "reproducible-preprocessing",
+  "version": 1,
+  "domain_id": "mlops",
+  "section_id": "mlops",
+  "concept_id": "reproducible-preprocessing",
+  "tags": [
+    "pipelines",
+    "model-versioning"
+  ],
+  "difficulty": "introductory",
+  "question_type": "scenario",
+  "title": "Reproducible preprocessing",
+  "prompt": "A model was trained with median imputation and scaling. A serving script recomputes medians and scales from each incoming batch. What should you save and reuse so the same raw input is transformed the same way at training and prediction time?",
+  "objective": "Explain how to reuse fitted preprocessing and version it with the model.",
+  "expected_scope": "Describe which state to save, how to apply it to future data and how to keep the transformation reproducible.",
+  "expected_answer_words": [
+    50,
+    100
+  ],
+  "hint": "Separate the formula for scaling from the numbers the formula uses.",
+  "reference_explanation": "Fit imputation and scaling on training data. Save the fitted steps with the model, such as in one versioned pipeline, including the learned medians and scales. At prediction time, apply these saved transformations in order without refitting. Keep the feature schema and software versions with the release so it is possible to reproduce the transformation and detect incompatible inputs.",
+  "criteria": [
+    {
+      "id": "keep-fitted-state",
+      "description": "Saves the preprocessing steps together with their training-derived parameters.",
+      "weight": "0.40"
+    },
+    {
+      "id": "transform-only",
+      "description": "Applies the saved transformation to new data without recalculating statistics.",
+      "weight": "0.35"
+    },
+    {
+      "id": "record-version",
+      "description": "Keeps preprocessing tied to the model version and records a relevant reproducibility detail, such as feature order or dependencies.",
+      "weight": "0.25"
+    }
+  ],
+  "critical_misconceptions": [
+    "Claiming that using the same scaler class is enough when serving fits it to each incoming batch."
+  ],
+  "sources": [
+    {
+      "id": "sklearn-preprocessing",
+      "title": "scikit-learn — Inconsistent preprocessing",
+      "url": "https://scikit-learn.org/stable/common_pitfalls.html#inconsistent-preprocessing",
+      "reviewed_on": "2026-11-17",
+      "supports": [
+        "objective",
+        "keep-fitted-state",
+        "transform-only"
+      ]
+    },
+    {
+      "id": "sklearn-persistence",
+      "title": "scikit-learn — Model persistence",
+      "url": "https://scikit-learn.org/stable/model_persistence.html",
+      "reviewed_on": "2026-11-17",
+      "supports": [
+        "record-version"
+      ]
+    }
+  ],
+  "retired": false
+}

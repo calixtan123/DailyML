@@ -95,7 +95,13 @@ def main() -> None:
     args = parser.parse_args()
     _validate_wheel(args.wheel)
     with tempfile.TemporaryDirectory(prefix="daily-ml installed ") as directory:
-        _launch(args.executable.absolute(), Path(directory))
+        executable = args.executable.absolute()
+        result = subprocess.run(
+            [str(executable), "validate-bank"], cwd=directory, check=True,
+            capture_output=True, text=True, timeout=8,
+        )
+        assert "12 questions across 6 sections" in result.stdout
+        _launch(executable, Path(directory))
     print("Wheel and installed launcher passed.")
 
 

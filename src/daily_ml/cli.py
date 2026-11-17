@@ -1,4 +1,4 @@
-"""Launch the installed app on one owned loopback socket and data directory."""
+"""Launch the installed app or validate its content bank offline."""
 
 import argparse
 import asyncio
@@ -14,6 +14,7 @@ from pathlib import Path
 import uvicorn
 
 from .app import LaunchError, create_app, resolve_assets
+from .bank import BankError, validate_bank
 from .config import ConfigError, load_settings, resolve_installation
 from .credentials import StorageError
 from .locking import LockBusy, file_lock
@@ -144,8 +145,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     run = commands.add_parser("run", help="Start Daily ML Practice")
     run.add_argument("--no-browser", action="store_true", help="Print the address and leave the browser closed")
     run.add_argument("--config", type=Path, help="Use this installation TOML")
+    validate = commands.add_parser("validate-bank", help="Validate the reviewed question bank offline")
+    validate.add_argument("--bank-dir", type=Path, help="Read a candidate curriculum and questions directory")
     args = parser.parse_args(argv)
     try:
+        if args.command == "validate-bank":
+            bank = validate_bank(args.bank_dir)
+            section_count = sum(len(domain.sections) for domain in bank.curriculum.domains)
+            print(f"Validated {len(bank.questions)} questions across {section_count} sections.")  # CLI output
+            return 0
         assets = resolve_assets()
         installation = resolve_installation(args.config)
         with own_data_directory(installation.data_dir), _logging(installation.data_dir):
@@ -166,7 +174,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     except KeyboardInterrupt:
         return 0
-    except (ConfigError, LaunchError, StorageError) as error:
+    except (BankError, ConfigError, LaunchError, StorageError) as error:
         parser.exit(1, f"Daily ML Practice: {error}\n")
     except (OSError, sqlite3.Error):
         parser.exit(1, "Daily ML Practice: Could not open local data. Check your data directory and permissions.\n")
