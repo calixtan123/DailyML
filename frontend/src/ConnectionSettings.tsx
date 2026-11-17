@@ -7,6 +7,7 @@ const LABELS = {
   signing_in: 'Signing in',
   connected: 'Connected',
   reconnect: 'Reconnect required',
+  declined: 'Authorization declined',
   cancelled: 'Sign-in cancelled',
   timeout: 'Sign-in timed out',
   error: 'Sign-in failed',
@@ -18,10 +19,12 @@ type Status = {
   plan_authorized: boolean
   message: string | null
   remote_revocation_unconfirmed: boolean
+  requires_consent: boolean
 }
 
 const CONNECTION = '/api/connection'
-const POLL_INTERVAL_MS = 450
+const SIGN_IN_POLL_MS = 450
+const STATUS_POLL_MS = 15_000
 const LAUNCH_PATH = /^\/api\/connection\/authorize\/[A-Za-z0-9_-]+$/
 
 export function ConnectionSettings({ request }: { request: LocalRequest }) {
@@ -32,38 +35,53 @@ export function ConnectionSettings({ request }: { request: LocalRequest }) {
   const [statusVersion, setStatusVersion] = useState(0)
 
   const phase = status?.state
-  const polling = phase === 'signing_in'
   useEffect(() => {
-    if (busy || (phase !== undefined && phase !== 'signing_in')) return
+    if (busy) return
 
-    const controller = new AbortController()
+    let activeRead: AbortController | undefined
     let timer: ReturnType<typeof setTimeout> | undefined
+    function schedule(state: Status['state'] | undefined) {
+      if (document.visibilityState !== 'hidden') {
+        timer = setTimeout(readStatus, state === 'signing_in' ? SIGN_IN_POLL_MS : STATUS_POLL_MS)
+      }
+    }
+
     async function readStatus() {
+      clearTimeout(timer)
+      activeRead?.abort()
+      if (document.visibilityState === 'hidden') return
+      const controller = new AbortController()
+      activeRead = controller
+      let nextPhase = phase
       try {
         const next = await request<Status>(CONNECTION, { signal: controller.signal })
         if (controller.signal.aborted) return
+        nextPhase = next.state
         setStatus(next)
         setError('')
-        if (next.state === 'signing_in' && polling) {
-          timer = setTimeout(readStatus, POLL_INTERVAL_MS)
-        } else if (next.state !== 'signing_in') {
-          setLaunchPath('')
-        }
+        if (next.state !== 'signing_in') setLaunchPath('')
       } catch (failure) {
         if (!controller.signal.aborted) {
           setError(failure instanceof Error ? failure.message : 'Could not load connection status.')
         }
+      } finally {
+        if (!controller.signal.aborted) schedule(nextPhase)
       }
     }
 
-    if (polling) timer = setTimeout(readStatus, POLL_INTERVAL_MS)
-    else void readStatus()
+    const refresh = () => { void readStatus() }
+    window.addEventListener('focus', refresh)
+    document.addEventListener('visibilitychange', refresh)
+    if (phase === undefined) refresh()
+    else schedule(phase)
 
     return () => {
-      controller.abort()
+      activeRead?.abort()
       clearTimeout(timer)
+      window.removeEventListener('focus', refresh)
+      document.removeEventListener('visibilitychange', refresh)
     }
-  }, [request, busy, phase, polling, statusVersion])
+  }, [request, busy, phase, statusVersion])
 
   async function signIn() {
     const popup = window.open('about:blank', '_blank')
@@ -79,6 +97,7 @@ export function ConnectionSettings({ request }: { request: LocalRequest }) {
         plan_authorized: status?.plan_authorized ?? false,
         message: null,
         remote_revocation_unconfirmed: status?.remote_revocation_unconfirmed ?? false,
+        requires_consent: status?.requires_consent ?? false,
       })
       if (popup && !popup.closed) {
         try {
@@ -137,7 +156,7 @@ export function ConnectionSettings({ request }: { request: LocalRequest }) {
             <>
               {status && status.state !== 'connected' && (
                 <button className="chatgpt-button" data-oai-siwc-button="" disabled={busy} onClick={() => void signIn()}>
-                  Continue with ChatGPT
+                  {status.requires_consent ? 'Enable ChatGPT plan use' : 'Continue with ChatGPT'}
                 </button>
               )}
               {hasAccount && <button disabled={busy} onClick={() => void finish('sign-out')}>Sign out</button>}

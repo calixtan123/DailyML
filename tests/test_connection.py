@@ -2,12 +2,18 @@
 
 import base64
 import hashlib
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlsplit
 
 import httpx
 import pytest
 
+from daily_ml import openai_oauth
 from daily_ml.connection import Connection, ConnectionError
+from daily_ml.locking import file_lock
 from oauth_support import CLIENT, OTHER_KEY, PLAN, Provider, callback, start, wait_for
 
 
@@ -180,17 +186,22 @@ def test_callback_listener_stops_for_denial_cancellation_and_timeout(flow, actio
         callback(params, code=None, error="access_denied")
     elif action == "cancel":
         connection.cancel_sign_in()
-    status = wait_for(connection, "timeout" if action == "wait" else "cancelled")
+    expected = {"wait": "timeout", "deny": "declined", "cancel": "cancelled"}
+    status = wait_for(connection, expected[action])
     assert not status.plan_authorized
+    assert not status.requires_consent
     assert provider.code_calls == []
     with pytest.raises(httpx.TransportError):
         callback(params)
+    if action == "deny":
+        next_attempt = start(connection, provider)
+        assert next_attempt["client_id"] == "dynamic_agent_client"
+        assert "prompt" not in next_attempt
 
 
-def test_cancelled_exchange_cannot_publish_credentials(flow):
-    """Cancellation still wins when a provider reply arrives after it."""
-    import threading
-
+@pytest.mark.parametrize("action", ["cancel", "sign_out"])
+def test_cancelled_exchange_cannot_publish_credentials(flow, action):
+    """A late provider reply cannot publish after cancellation or sign-out."""
     connection, provider = flow
     entered, release = threading.Event(), threading.Event()
     original_transport = provider.transport
@@ -206,9 +217,237 @@ def test_cancelled_exchange_cannot_publish_credentials(flow):
         try:
             callback(start(alternate, provider))
             assert entered.wait(1)
-            alternate.cancel_sign_in()
+            if action == "cancel":
+                alternate.cancel_sign_in()
+            else:
+                connection.sign_out()
             release.set()
         finally:
             release.set()
             alternate.close()
     assert not connection.get_status().plan_authorized
+
+
+@pytest.mark.parametrize("failure", ["subject", "audience", "scope", "rejected_client"])
+def test_rejected_client_only_replaced_after_verified_new_registration(flow, failure):
+    """A confirmed rejection permits a new client for the same verified subject."""
+    connection, provider = flow
+    initial = start(connection, provider)
+    callback(initial)
+    wait_for(connection, "connected")
+
+    returning = start(connection, provider)
+    assert returning["client_id"] == CLIENT
+    provider.code_response = httpx.Response(401, json={"error": {"code": "invalid_client"}})
+    callback(returning, client_id=None)
+    assert wait_for(connection, "error").plan_authorized
+    assert connection.get_access_token() == "original-access"
+
+    provider.code_response = None
+    replacement = start(connection, provider)
+    assert replacement["client_id"] == "dynamic_agent_client"
+    assert replacement["ext_agent_host_id"] == initial["ext_agent_host_id"]
+    if failure == "subject":
+        provider.claims["sub"] = "different-user"
+    elif failure == "audience":
+        provider.claims["aud"] = CLIENT
+    elif failure == "scope":
+        provider.scope = "openid email"
+    callback(replacement, client_id=CLIENT if failure == "rejected_client" else "oaiapp_replacement")
+    assert wait_for(connection, "error").plan_authorized
+    assert connection.get_access_token() == "original-access"
+
+    provider.claims.clear()
+    provider.scope = PLAN
+    replacement = start(connection, provider)
+    assert replacement["client_id"] == "dynamic_agent_client"
+    callback(replacement, client_id="oaiapp_replacement")
+    wait_for(connection, "connected")
+    assert start(connection, provider)["client_id"] == "oaiapp_replacement"
+
+
+@pytest.mark.parametrize("had_tokens", [True, False])
+def test_returning_provider_denial_prepares_explicit_consent_retry(flow, had_tokens):
+    """A verified returning decline prepares consent and leaves prior tokens intact."""
+    connection, provider = flow
+    callback(start(connection, provider))
+    wait_for(connection, "connected")
+    if not had_tokens:
+        connection.sign_out()
+
+    denied = start(connection, provider)
+    assert "prompt" not in denied
+    assert callback(denied, error="access_denied", code=None, client_id=None).status_code == 200
+    result = wait_for(connection, "declined")
+    assert result.requires_consent
+    assert result.plan_authorized is had_tokens
+    if had_tokens:
+        assert connection.get_access_token() == "original-access"
+    assert len(provider.code_calls) == 1
+
+    explicit_retry = start(connection, provider)
+    assert explicit_retry["client_id"] == CLIENT
+    assert explicit_retry["prompt"] == "consent"
+    assert explicit_retry["scope"] == denied["scope"]
+
+
+def test_local_cancel_does_not_prepare_consent(flow):
+    """Cancel does not change the registration or the next authorization prompt."""
+    connection, provider = flow
+    callback(start(connection, provider))
+    wait_for(connection, "connected")
+    start(connection, provider)
+    assert connection.cancel_sign_in().state == "cancelled"
+    next_attempt = start(connection, provider)
+    assert next_attempt["client_id"] == CLIENT
+    assert "prompt" not in next_attempt
+
+
+@pytest.mark.parametrize(("phase", "action"), [
+    ("normal", "success"),
+    ("token_headers", "close"),
+    ("token_body", "close"),
+    ("jwks_headers", "close"),
+    ("token_headers", "deadline"),
+    ("token_body", "deadline"),
+    ("jwks_headers", "deadline"),
+])
+def test_provider_exchange_is_bounded_and_cancellable(tmp_path, monkeypatch, phase, action):
+    """A real socket can trickle through token headers, body or JWKS without prolonging sign-in."""
+    entered = threading.Event()
+    provider = Provider()
+
+    class SlowProvider(BaseHTTPRequestHandler):
+        """Serve a valid, deliberately slow provider response on loopback."""
+
+        def log_message(self, format, *args):
+            """Keep the simulated provider quiet."""
+
+        def do_POST(self):
+            """Return a signed token response."""
+            self._respond("token", self.rfile.read(int(self.headers["Content-Length"])))
+
+        def do_GET(self):
+            """Return the signing key for the token."""
+            self._respond("jwks", b"")
+
+        def _respond(self, endpoint, request_body):
+            """Keep progressing slowly enough to avoid an inactivity timeout."""
+            uri = openai_oauth.ISSUER + self.path
+            reply = provider.transport(httpx.Request(self.command, uri, content=request_body)).content
+            try:
+                # A slow token request followed by a slow JWKS request also exceeds the shared budget.
+                if endpoint == "token" and phase == "jwks_headers":
+                    time.sleep(0.35)
+                self.wfile.write(b"HTTP/1.1 200 OK\r\n")
+                if phase == endpoint + "_headers":
+                    self.wfile.write(b"X-Probe: ")
+                    self._trickle()
+                    self.wfile.write(b"\r\n")
+                self.wfile.write(f"Content-Length: {len(reply)}\r\n\r\n".encode())
+                if phase == endpoint + "_body":
+                    self._trickle(body=reply)
+                else:
+                    self.wfile.write(reply)
+            except OSError:
+                pass  # Closing the peer is the expected cancellation path.
+
+        def _trickle(self, body=None):
+            """Deliver bytes for longer than one total-request budget."""
+            entered.set()
+            for index in range(20):
+                self.wfile.write(b"x" if body is None else body[index:index + 1])
+                time.sleep(0.075)
+            if body is not None:
+                self.wfile.write(body[20:])
+
+    with HTTPServer(("127.0.0.1", 0), SlowProvider) as server:
+        origin = f"http://127.0.0.1:{server.server_port}"
+        token_url = origin + "/api/accounts/oauth/token"
+        jwks_url = origin + "/.well-known/jwks.json"
+        # The installed process resolves the production endpoints itself. The test runner routes
+        # its fixed URLs to the loopback double inside the disposable child.
+        runner = (
+            "from daily_ml import openai_oauth as oauth; "
+            f"oauth.TOKEN_ENDPOINT = {token_url!r}; oauth.JWKS = {jwks_url!r}; "
+            "oauth._serve_provider_request()"
+        )
+        monkeypatch.setattr(openai_oauth, "TOKEN_ENDPOINT", token_url)
+        monkeypatch.setattr(openai_oauth, "JWKS", jwks_url)
+        monkeypatch.setattr(openai_oauth, "_PROVIDER_COMMAND", (sys.executable, "-I", "-c", runner))
+        monkeypatch.setattr(openai_oauth, "HTTP_TIMEOUT", 1.1)
+
+        worker = threading.Thread(target=server.serve_forever)
+        worker.start()
+        connection = Connection(tmp_path)
+        try:
+            params = start(connection, provider)
+            started = time.monotonic()
+            assert callback(params).status_code == 200
+            if action == "success":
+                assert wait_for(connection, "connected").plan_authorized
+                return
+            assert entered.wait(2)
+            if action == "close":
+                shutdown = time.monotonic()
+                connection.close()
+                assert time.monotonic() - shutdown < 0.75
+            else:
+                result = wait_for(connection, "error")
+                assert "timed out" in result.message
+                assert time.monotonic() - started < 1.5
+            assert not connection.get_status().plan_authorized
+            assert not (tmp_path / "credentials/session.json").exists()
+        finally:
+            connection.close()
+            server.shutdown()
+            worker.join()
+
+
+@pytest.mark.parametrize("action", ["complete", "close"])
+def test_pending_commit_respects_credential_lock_and_shutdown(flow, action):
+    """The credential lock allows ordinary contention and wakes promptly on shutdown."""
+    connection, provider = flow
+    entered = threading.Event()
+    original_transport = provider.transport
+
+    def signal_jwks(request):
+        if request.url.path.endswith("/jwks.json"):
+            entered.set()
+        return original_transport(request)
+
+    with httpx.Client(transport=httpx.MockTransport(signal_jwks)) as http:
+        alternate = Connection(connection.data_dir, http=http)
+        try:
+            params = start(alternate, provider)
+            with file_lock(connection.data_dir / "credentials/.lock", wait=0):
+                callback(params)
+                assert entered.wait(1)
+                if action == "complete":
+                    time.sleep(1.15)
+                else:
+                    started = time.monotonic()
+                    alternate.close()
+                    assert time.monotonic() - started < 0.65
+            if action == "complete":
+                assert wait_for(alternate, "connected").plan_authorized
+            else:
+                assert not connection.get_status().plan_authorized
+        finally:
+            alternate.close()
+
+
+def test_decline_of_unverified_retry_returns_to_initial_registration(flow):
+    """A provider decline keeps the opt-in on the initial flow until identity is verified."""
+    connection, provider = flow
+    provider.code_response = httpx.Response(400, json={"error": "invalid_grant"})
+    callback(start(connection, provider))
+    wait_for(connection, "error")
+    retry = start(connection, provider)
+    assert retry["client_id"] == CLIENT
+
+    callback(retry, client_id=None, error="access_denied", code=None)
+    assert not wait_for(connection, "declined").requires_consent
+    next_attempt = start(connection, provider)
+    assert next_attempt["client_id"] == "dynamic_agent_client"
+    assert "prompt" not in next_attempt

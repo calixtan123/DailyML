@@ -2,7 +2,10 @@
 
 import json
 import logging
+import subprocess
+import sys
 import time
+from threading import Event
 from typing import Annotated
 
 import httpx
@@ -21,9 +24,14 @@ DYNAMIC_CLIENT = "dynamic_agent_client"
 SCOPES = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
 MAX_BODY = 256 * 1024
 HTTP_TIMEOUT = 4
+PROVIDER_POLL_SECONDS = 0.05
+_PROVIDER_COMMAND = (
+    sys.executable, "-I", "-c",
+    "from daily_ml.openai_oauth import _serve_provider_request; _serve_provider_request()",
+)
 TERMINAL_REFRESH = {
     "invalid_grant", "invalid_refresh_token", "token_expired", "refresh_token_expired",
-    "refresh_token_invalidated", "refresh_token_reused", "invalid_client",
+    "refresh_token_invalidated", "refresh_token_reused",
 }
 
 logger = logging.getLogger(__name__)
@@ -50,28 +58,89 @@ class TokenReply(BaseModel):
     scope: Annotated[str, Field(max_length=1024)] | None = None
 
 
-class OpenAIOAuth:
-    """Use a supplied HTTP client for interactions with fixed OpenAI endpoints."""
+def _http_request(http: httpx.Client, method: str, url: str, data: dict | None) -> tuple[int, bytes]:
+    """Stream a size-limited reply from a fixed provider endpoint."""
+    try:
+        with http.stream(
+            method, url, data=data, timeout=HTTP_TIMEOUT, follow_redirects=False,
+            headers={"Accept": "application/json"},
+        ) as reply:
+            body = bytearray()
+            for chunk in reply.iter_bytes(chunk_size=8192):
+                body.extend(chunk)
+                if len(body) > MAX_BODY:
+                    raise OAuthError("ChatGPT returned an oversized response.")
+            return reply.status_code, bytes(body)
+    except httpx.HTTPError:
+        raise OAuthError("ChatGPT could not be reached. Try again.", transient=True) from None
 
-    def __init__(self, http: httpx.Client) -> None:
+
+def _serve_provider_request() -> None:
+    """Execute one HTTP request from a private pipe without access to the credential store."""
+    method, url, form = json.load(sys.stdin.buffer)
+    if (method, url) not in {("POST", TOKEN_ENDPOINT), ("POST", REVOKE_ENDPOINT), ("GET", JWKS)}:
+        return
+    with httpx.Client(trust_env=False) as http:
+        try:
+            status, body = _http_request(http, method, url, form)
+        except OAuthError as error:
+            status, body = (0 if error.transient else 1), b""
+    sys.stdout.buffer.write(f"{status}\n".encode() + body)
+
+
+class OpenAIOAuth:
+    """Run one OAuth operation over a shared deadline for all its provider requests."""
+
+    def __init__(self, http: httpx.Client | None, *, cancelled: Event) -> None:
         self._http = http
+        self._cancelled = cancelled
+        self._deadline = time.monotonic() + HTTP_TIMEOUT
+
+    def _remaining(self) -> float:
+        """Check cancellation and the total operation budget before proceeding."""
+        if self._cancelled.is_set():
+            raise OAuthError("ChatGPT authorization was cancelled.")
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise OAuthError("The ChatGPT request timed out. Try again.")
+        return remaining
 
     def _request(self, method: str, url: str, *, data: dict | None = None) -> tuple[int, bytes]:
-        """Enforce a bounded response and discard provider diagnostics."""
+        """Bound the whole HTTP request, including DNS, headers and slow body reads."""
+        self._remaining()
+        if self._http is not None:
+            result = _http_request(self._http, method, url, data)
+            self._remaining()
+            return result
+
+        # The isolated process has no credential storage responsibilities. The parent
+        # can stop network I/O even if DNS or HTTP has not returned control to Python.
         try:
-            with self._http.stream(
-                method, url, data=data, timeout=HTTP_TIMEOUT, follow_redirects=False,
-                headers={"Accept": "application/json"},
-            ) as reply:
-                body = bytearray()
-                deadline = time.monotonic() + HTTP_TIMEOUT
-                for chunk in reply.iter_bytes(chunk_size=8192):
-                    body.extend(chunk)
-                    if len(body) > MAX_BODY or time.monotonic() >= deadline:
-                        raise OAuthError("ChatGPT returned an oversized or slow response.")
-                return reply.status_code, bytes(body)
-        except httpx.HTTPError:
+            with subprocess.Popen(
+                _PROVIDER_COMMAND, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            ) as worker:
+                payload = json.dumps((method, url, data)).encode()
+                try:
+                    while True:
+                        try:
+                            response, _ = worker.communicate(
+                                input=payload, timeout=min(self._remaining(), PROVIDER_POLL_SECONDS),
+                            )
+                            break
+                        except subprocess.TimeoutExpired:
+                            payload = None  # communicate retains the original input on retry.
+                finally:
+                    if worker.poll() is None:
+                        worker.kill()
+                self._remaining()
+        except OSError:
             raise OAuthError("ChatGPT could not be reached. Try again.", transient=True) from None
+        status, _, body = response.partition(b"\n")
+        if worker.returncode or not status.isdigit() or status == b"0":
+            raise OAuthError("ChatGPT could not be reached. Try again.", transient=True)
+        if status == b"1" or len(body) > MAX_BODY:
+            raise OAuthError("ChatGPT returned an oversized response.")
+        return int(status), body
 
     def _token(self, form: dict[str, str]) -> TokenReply:
         """Request a public-client grant and validate its shape."""
@@ -82,14 +151,14 @@ class OpenAIOAuth:
                 try:
                     payload = json.loads(body)
                     value = payload.get("error") if isinstance(payload, dict) else None
-                    if isinstance(value, str) and value in TERMINAL_REFRESH:
+                    if isinstance(value, str) and value in TERMINAL_REFRESH | {"invalid_client"}:
                         code = value
                     if isinstance(value, dict) and value.get("code") == "invalid_client":
                         code = "invalid_client"
                 except ValueError:
                     pass
             if code == "invalid_client":
-                raise OAuthError("ChatGPT rejected the registered client. Review the connection in ChatGPT.", code=code)
+                raise OAuthError("ChatGPT rejected this registration. Try connecting again.", code=code)
             if status >= 500 or status == 429:
                 raise OAuthError("ChatGPT is temporarily unavailable. Try again.", transient=True)
             raise OAuthError("ChatGPT did not accept the authorization. Try signing in again.", code=code)
@@ -255,7 +324,7 @@ class OpenAIOAuth:
             except OAuthError as error:
                 if not error.transient:
                     break
-            if attempt == 0:
-                time.sleep(0.25)
+            if attempt == 0 and self._deadline - time.monotonic() > 0.25:
+                self._cancelled.wait(0.25)
         logger.info("ChatGPT session revocation could not be confirmed")
         return False

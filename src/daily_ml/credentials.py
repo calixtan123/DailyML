@@ -7,6 +7,7 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Event
 from typing import Annotated
 from uuid import UUID, uuid4
 
@@ -55,6 +56,7 @@ class Session(BaseModel):
     tokens: Tokens | None = Field(default=None, repr=False)
     reconnect: bool = False
     requires_consent: bool = False
+    client_rejected: bool = False
     remote_revocation_unconfirmed: bool = False
 
 
@@ -80,8 +82,13 @@ class CredentialStore:
             raise StorageError("Could not protect Daily ML credential storage.") from None
 
     @contextmanager
-    def locked(self) -> Iterator[None]:
+    def locked(self, *, cancelled: Event | None = None) -> Iterator[None]:
         """Serialize a read, optional provider call and replacement.
+
+        Parameters
+        ----------
+        cancelled : Event or None
+            Optional signal that interrupts a pending acquisition.
 
         Yields
         ------
@@ -94,7 +101,7 @@ class CredentialStore:
             If the bounded lock wait ends or the lock is inaccessible.
         """
         try:
-            with file_lock(self.directory / ".lock", wait=CREDENTIAL_LOCK_WAIT):
+            with file_lock(self.directory / ".lock", wait=CREDENTIAL_LOCK_WAIT, cancelled=cancelled):
                 yield
         except (OSError, LockBusy):
             raise StorageError("Daily ML credential storage is busy or unavailable. Try again.") from None

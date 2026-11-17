@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConnectionSettings } from './ConnectionSettings'
 import type { LocalRequest } from './api'
@@ -6,6 +6,7 @@ import type { LocalRequest } from './api'
 const offline = {
   state: 'signed_out',
   email: null as string | null,
+  requires_consent: false,
   plan_authorized: false,
   message: null,
   remote_revocation_unconfirmed: false,
@@ -87,6 +88,48 @@ describe('ChatGPT connection controls', () => {
     expect(screen.getByText(/Remote revocation could not be confirmed/)).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Manage usage and credits' }).getAttribute('href'))
       .toBe('https://chatgpt.com/settings/usage')
+  })
+
+  it('notices expired authorization while Settings remains visible', async () => {
+    vi.useFakeTimers()
+    try {
+      const api = mockApi(connected)
+      render(<ConnectionSettings request={api.request} />)
+      await act(async () => {})
+      expect(screen.getByText('Connected')).toBeTruthy()
+      api.changeStatus({ ...connected, state: 'reconnect', plan_authorized: false })
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+      expect(screen.getByText('Reconnect required')).toBeTruthy()
+      expect(screen.queryByText('ChatGPT plan use authorized')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each(['focus', 'visibilitychange'])('detects another tab signing out on %s', async (event) => {
+    const api = mockApi(connected)
+    render(<ConnectionSettings request={api.request} />)
+    await screen.findByText('Connected')
+    api.changeStatus(offline)
+    const target = event === 'focus' ? window : document
+    if (event === 'visibilitychange') {
+      const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+      fireEvent(document, new Event(event))
+      expect(screen.getByText('Connected')).toBeTruthy()
+      visibility.mockReturnValue('visible')
+    }
+    fireEvent(target, new Event(event))
+    await screen.findByText('Signed out')
+    expect(screen.queryByText('ChatGPT plan use authorized')).toBeNull()
+  })
+
+  it('offers deliberate plan consent after the provider declines', async () => {
+    vi.spyOn(window, 'open').mockReturnValue(null)
+    const api = mockApi({ ...offline, state: 'declined', requires_consent: true })
+    render(<ConnectionSettings request={api.request} />)
+    await screen.findByText('Authorization declined')
+    fireEvent.click(screen.getByRole('button', { name: 'Enable ChatGPT plan use' }))
+    expect(await screen.findByText('Signing in')).toBeTruthy()
   })
 
   it('keeps a recoverable message when a connection request fails', async () => {

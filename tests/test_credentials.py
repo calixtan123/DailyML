@@ -203,3 +203,22 @@ def test_reject_symlink_to_credentials(connected, tmp_path):
     with pytest.raises(ConnectionError, match="credential storage"):
         first.get_status()
     assert target.read_text() == "separate"
+
+
+def test_rejected_refresh_client_recovers_after_sign_out_and_restart(connected):
+    """A confirmed client rejection remains distinct from ordinary session renewal."""
+    first, second, provider, initial = connected
+    provider.refresh_response = httpx.Response(401, json={"error": "invalid_client"})
+    with pytest.raises(ConnectionError):
+        first.get_access_token()
+    assert second.get_status().state == "reconnect"
+    assert second.get_access_token() == "original-access"
+    assert len(provider.refresh_calls) == 1
+    assert first.sign_out().state == "signed_out"
+
+    replacement = start(second, provider)
+    assert replacement["client_id"] == "dynamic_agent_client"
+    assert replacement["ext_agent_host_id"] == initial["ext_agent_host_id"]
+    callback(replacement, client_id="oaiapp_replacement")
+    wait_for(second, "connected")
+    assert start(first, provider)["client_id"] == "oaiapp_replacement"
