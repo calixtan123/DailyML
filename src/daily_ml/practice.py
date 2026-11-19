@@ -16,6 +16,7 @@ from .database import Database
 from .grading import GradingContext
 from .grading_jobs import enqueue_practice_request, practice_grading_status, public_request
 from .practice_versions import bind_grading_version, initialize_versions, save_answer_version
+from .disputes import disputes_projection, initialize_disputes, register_reassessment, resolve_dispute
 from .scheduling import NEXT_DAY, ReviewState, due_concepts as scheduled_due_concepts, initialize_reviews, read_reviews
 
 DAILY_GOAL = 2
@@ -286,6 +287,7 @@ class Practice:
                 connection.execute(statement)
             initialize_reviews(connection, self.review_intervals)
             initialize_versions(connection)
+            initialize_disputes(connection)
 
     def today(self, timezone: str) -> PracticeToday:
         """Get today's session, saving the recommendation pair if needed.
@@ -600,6 +602,77 @@ class Practice:
             connection.execute("BEGIN")
             if not connection.execute("SELECT 1 FROM practice_items WHERE id = ?", (item_id,)).fetchone():
                 raise PracticeItemNotFound(item_id)
+            return self._read_submission(connection, item_id)
+
+    def open_dispute(self, item_id: str, request_id: str, objection: str) -> dict:
+        """Persist an objection and exclude only its original-track evidence.
+
+        Raises
+        ------
+        SubmissionConflict
+            If the displayed assessment is missing, unassessed, or already disputed.
+        """
+        if not objection.strip() or len(objection) > 1600:
+            raise DraftInvalid("Write an objection of at most 1600 characters.")
+        with self.database.connect(immediate=True) as connection:
+            connection.row_factory = sqlite3.Row
+            target = connection.execute("""
+                SELECT * FROM practice_evaluated_requests
+                WHERE id = ? AND item_id = ? AND state = 'assessed'
+            """, (request_id, item_id)).fetchone()
+            if target is None:
+                raise SubmissionConflict("Choose an assessed saved answer to dispute.")
+            if connection.execute("SELECT 1 FROM practice_disputes WHERE target_request_id = ?", (request_id,)).fetchone():
+                raise SubmissionConflict("This assessment already has a dispute.")
+            dispute_id = str(uuid4())
+            connection.execute("""
+                INSERT INTO practice_disputes
+                (id, item_id, target_request_id, target_version_id, role, objection, opened_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (dispute_id, item_id, request_id, target["submission_version_id"], target["role"], objection.strip(),
+                  self._clock().timestamp()))
+            if target["role"] == "original":
+                from .scheduling import select_review_evidence
+                select_review_evidence(connection, item_id, None, self.review_intervals)
+            return self._read_submission(connection, item_id)
+
+    def reassess_dispute(
+        self, item_id: str, dispute_id: str, *, resolve_settings: Callable[[sqlite3.Connection], tuple[str, str | None]],
+    ) -> tuple[dict, str | None]:
+        """Queue or reuse one reassessment of the immutable disputed submission."""
+        with self.database.connect(immediate=True) as connection:
+            connection.row_factory = sqlite3.Row
+            dispute = connection.execute("""
+                SELECT * FROM practice_disputes WHERE id = ? AND item_id = ? AND selected_request_id IS NULL
+            """, (dispute_id, item_id)).fetchone()
+            if dispute is None:
+                raise SubmissionConflict("This dispute is no longer open.")
+            latest = connection.execute("""
+                SELECT request.* FROM practice_dispute_reassessments AS link
+                JOIN grading_requests AS request ON request.id = link.request_id
+                WHERE link.dispute_id = ? ORDER BY request.created_at DESC, request.rowid DESC LIMIT 1
+            """, (dispute_id,)).fetchone()
+            if latest is not None and latest["state"] in ("queued", "preparing", "in_flight", "assessed"):
+                return self._read_submission(connection, item_id), None
+            _, model_id = resolve_settings(connection)
+            if model_id is None:
+                raise SubmissionConflict("Choose a model in Settings before requesting reassessment.")
+            target = connection.execute("SELECT * FROM practice_evaluated_requests WHERE id = ?", (dispute["target_request_id"],)).fetchone()
+            context = GradingContext.model_validate_json(target["context_json"]).model_copy(update={"objection": dispute["objection"]})
+            request_id = enqueue_practice_request(
+                connection, context, model_id, self._clock().timestamp(), retry_of=latest["id"] if latest else None,
+                mode=self._request_mode(target, model_id),
+            )
+            register_reassessment(connection, dispute_id, request_id)
+            return self._read_submission(connection, item_id), request_id
+
+    def resolve_dispute(self, item_id: str, dispute_id: str, assessment_request_id: str) -> dict:
+        """Accept one assessment belonging to an open dispute in one transaction."""
+        with self.database.connect(immediate=True) as connection:
+            try:
+                resolve_dispute(connection, dispute_id, assessment_request_id, self.review_intervals, self._clock().timestamp())
+            except LookupError as error:
+                raise SubmissionConflict(str(error)) from None
             return self._read_submission(connection, item_id)
 
     def save_clarification_draft(
@@ -991,6 +1064,7 @@ class Practice:
             "versions": versions,
             "revision": revision,
             "revision_draft": revision_draft,
+            "disputes": disputes_projection(connection, item_id),
         }
 
     @staticmethod
@@ -1209,52 +1283,29 @@ class Practice:
         ]
         calendar_date = date.fromisoformat(local_date)
         week_start = calendar_date - timedelta(days=calendar_date.weekday())
-        week_start_time = datetime.combine(
-            week_start, datetime.min.time(), tzinfo=ZoneInfo(day.timezone),
-        ).timestamp()
         counts = dict(connection.execute(
             """SELECT local_date, COUNT(*) FROM practice_credits
                WHERE local_date BETWEEN ? AND ? GROUP BY local_date""",
             (week_start.isoformat(), local_date),
         ))
         first_use_date, = connection.execute("SELECT MIN(local_date) FROM practice_days").fetchone()
-        # Preserve pending work and drafts across weeks. Keep one older assessment
-        # on each track per question available for revision or comparison.
+        # Every saved submission can be reopened from Today across practice days.
         submitted = [
             self._item(row)
             for row in connection.execute(
-                """WITH submitted_requests AS (
-                       SELECT item.id, item.question_id, item.local_date, item.section_title,
-                              item.snapshot_json, item.draft_text, item.draft_version, request.state, request.error,
-                              request.id AS request_id, request.created_at AS request_at,
-                              submission.completed_date, revision.item_id IS NOT NULL AS has_revision,
-                              CASE WHEN revision.item_id IS NULL THEN submission.completed_at
-                                   ELSE request.created_at END AS activity_at
-                       FROM practice_submissions AS submission
-                       JOIN practice_items AS item ON item.id = submission.item_id
-                       LEFT JOIN practice_revisions AS revision ON revision.item_id = submission.item_id
-                       JOIN grading_requests AS request
-                         ON request.id = COALESCE(revision.current_request_id, submission.current_request_id)
-                   ),
-                   older_assessments AS (
-                       SELECT id, ROW_NUMBER() OVER (
-                           PARTITION BY question_id, has_revision ORDER BY activity_at DESC, id
-                       ) AS recency
-                       FROM submitted_requests
-                       WHERE state = 'assessed' AND completed_date < :week_start AND request_at < :week_start_time
+                """SELECT item.id, item.local_date, item.section_title, item.snapshot_json,
+                          item.draft_text, item.draft_version, request.state, request.error
+                   FROM practice_submissions AS submission
+                   JOIN practice_items AS item ON item.id = submission.item_id
+                   LEFT JOIN practice_revisions AS revision ON revision.item_id = submission.item_id
+                   JOIN grading_requests AS request
+                     ON request.id = COALESCE(revision.current_request_id, submission.current_request_id)
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM practice_selections WHERE local_date = ? AND item_id = item.id
                    )
-                   SELECT item.id, item.local_date, item.section_title, item.snapshot_json,
-                          item.draft_text, item.draft_version, item.state, item.error
-                   FROM submitted_requests AS item
-                   WHERE (item.completed_date >= :week_start OR item.state <> 'assessed'
-                          OR item.request_at >= :week_start_time
-                          OR EXISTS (SELECT 1 FROM practice_revision_drafts WHERE request_id = item.request_id)
-                          OR item.id IN (SELECT id FROM older_assessments WHERE recency = 1))
-                     AND NOT EXISTS (
-                         SELECT 1 FROM practice_selections WHERE local_date = :local_date AND item_id = item.id
-                     )
-                   ORDER BY item.activity_at DESC, item.id""",
-                {"week_start": week_start.isoformat(), "week_start_time": week_start_time, "local_date": local_date},
+                   ORDER BY CASE WHEN revision.item_id IS NULL THEN submission.completed_at
+                                 ELSE request.created_at END DESC, item.id""",
+                (local_date,),
             )
         ]
         recommended = sum(selection.kind in ("review", "variety") for selection in selections)

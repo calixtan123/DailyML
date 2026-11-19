@@ -479,7 +479,7 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
                   {submittedItems.length > 0 && (
                     <optgroup label="Submitted answers">
                       {submittedItems.map(item => <option key={item.id} value={item.id}>
-                        {item.question.title} · {gradingLabel(item)}
+                        {item.question.title} · {item.local_date} · {gradingLabel(item)}
                       </option>)}
                     </optgroup>
                   )}
@@ -523,7 +523,9 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
                         <li key={item.id}>
                           <button type="button" disabled={controlsDisabled} onClick={() => selectItem(item)}
                             aria-current={editor?.item.id === item.id ? 'true' : undefined}>
-                            <span>{item.question.title}<span className="session-kind">{gradingLabel(item)}</span></span>
+                            <span>{item.question.title}<span className="session-kind">
+                              {item.local_date} · {gradingLabel(item)}
+                            </span></span>
                           </button>
                         </li>
                       ))}
@@ -580,7 +582,7 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
             {editor.item.submitted ? (
               <PracticeFeedback key={editor.item.id} itemId={editor.item.id} request={request} active={active}
                 initial={initialSubmission} answerLimit={session.answer_limit} navigationPending={busy}
-                leaveEditor={feedbackLeave} onStatus={observeGradingStatus} />
+                leaveEditor={feedbackLeave} onStatus={observeGradingStatus} onReviewsChanged={requestTodayRefresh} />
             ) : <div className="today-editor">
               <div className="today-editor-label">
                 <label htmlFor="practice-answer">Your answer</label>

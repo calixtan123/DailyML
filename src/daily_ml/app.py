@@ -115,6 +115,21 @@ class RetryPractice(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=128)
 
 
+class DisputeOpen(BaseModel):
+    """Open a challenge against one saved assessed answer."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    request_id: UUID = Field(strict=False)
+    objection: str = Field(min_length=1, max_length=1600)
+
+
+class DisputeResolution(BaseModel):
+    """Select an assessed result from one open dispute."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    assessment_request_id: UUID = Field(strict=False)
+
+
 def resolve_assets(assets_dir: Path | None = None) -> Path:
     """Locate compiled assets in the installed package.
 
@@ -475,6 +490,24 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         if dispatch_id:
             background.add_task(request.app.state.grading.run_pending, dispatch_id)
         return submission
+
+    @app.post("/api/practice/items/{item_id}/disputes")
+    def open_dispute(item_id: UUID, action: DisputeOpen) -> dict:
+        """Store an objection and remove the challenged original evidence from review replay."""
+        return practice.open_dispute(str(item_id), str(action.request_id), action.objection)
+
+    @app.post("/api/practice/items/{item_id}/disputes/{dispute_id}/reassess", status_code=202)
+    def reassess_dispute(item_id: UUID, dispute_id: UUID, request: Request, background: BackgroundTasks) -> dict:
+        """Request an explicit reassessment of the exact saved disputed version."""
+        submission, dispatch_id = practice.reassess_dispute(str(item_id), str(dispute_id), resolve_settings=submission_settings)
+        if dispatch_id:
+            background.add_task(request.app.state.grading.run_pending, dispatch_id)
+        return submission
+
+    @app.post("/api/practice/items/{item_id}/disputes/{dispute_id}/resolve")
+    def resolve_dispute_route(item_id: UUID, dispute_id: UUID, action: DisputeResolution) -> dict:
+        """Accept one available assessment and atomically refresh review eligibility."""
+        return practice.resolve_dispute(str(item_id), str(dispute_id), str(action.assessment_request_id))
 
     @app.post("/api/practice/today")
     def open_today() -> PracticeToday:

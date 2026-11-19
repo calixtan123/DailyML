@@ -36,6 +36,12 @@ Settings shows the model's feedback and a local grade from 0 to 3, or its reques
 
 When feedback asks for clarification, edit the clarified answer and send it from the saved practice item. After assessment, **Revise answer** lets you submit one assisted revision and compare both answers and their feedback. You can save an edit locally before sending it. Clarification and revision preserve the original answer and completion credit. The eventual original assessment sets the next review date. A revision leaves that schedule in place.
 
+## Dispute an assessment
+
+Use **Dispute assessment** on a saved assessed answer to retain its exact evaluated version, feedback, and your objection. An open dispute removes only that original answer's accepted assessment from review scheduling; other accepted evidence and any earlier **Review sooner** request remain. If this leaves no accepted assessment, the concept shows **Awaiting accepted assessment** and stays available for practice. The original completion remains in the calendar.
+
+**Request reassessment** sends that same frozen answer, marking guide, references, support classification, and role through the normal grading and usage path. It sends the objection only for that explicit reassessment. Compare the two assessments, then accept either one or leave the dispute open. Accepting a reassessment selects it for the original answer's review replay; an assisted-revision dispute never changes the original answer's review schedule. Reassessment failures and uncertain results remain saved and can be explicitly requested again. SQLite backup and restore retain open disputes, comparison feedback, and selected resolutions.
+
 ## Settings and local data
 
 The default directory is `~/Library/Application Support/Daily ML Practice/`. It contains the SQLite database for preferences, imported question versions, saved recommendations, question snapshots and drafts, plus rotating operational logs and a protected `credentials/` directory. A consistent SQLite backup includes the saved practice records. Keep credentials out of SQLite backups. Signing out retains SQLite data and the saved account registration and installation identity.
