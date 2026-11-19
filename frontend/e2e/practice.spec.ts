@@ -272,3 +272,76 @@ test('A revealed offline gap is acknowledged after midnight, credited, scheduled
     }
   },
 )
+
+test('History is available before sign-in and resumes the exact saved draft with the keyboard',
+  async ({ page }) => {
+    const beforeMidnight = '2026-03-29T22:58:00+00:00'
+    const root = await mkdtemp(join(tmpdir(), 'daily-ml history '))
+    const clockFile = join(root, 'clock')
+    const gate = join(root, 'release-offline-grading')
+    const draft = 'Keep this exact local draft while I inspect history.'
+    await writeFile(clockFile, beforeMidnight)
+    const executable = process.env.DML_E2E_EXECUTABLE ?? resolve('../.venv/bin/daily-ml')
+    const child = spawn(join(dirname(executable), 'python'), [resolve('e2e/practice_server.py')], {
+      cwd: root,
+      env: {
+        ...process.env, DML_DATA_DIR: join(root, 'App data'), DML_PORT: '0', DML_TIMEZONE: 'Europe/London',
+        DML_E2E_CLOCK: clockFile, DML_E2E_GRADING_GATE: gate,
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+
+    try {
+      const origin = await new Promise<string>((ready, reject) => {
+        let output = ''
+        const deadline = setTimeout(() => reject(new Error(`Test launcher did not start. ${output}`)), 8_000)
+        child.once('error', (error) => { clearTimeout(deadline); reject(error) })
+        child.once('exit', () => { clearTimeout(deadline); reject(new Error(output)) })
+        child.stderr?.on('data', (chunk: Buffer) => {
+          output += chunk.toString()
+          const address = output.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0]
+          if (address) { clearTimeout(deadline); ready(address) }
+        })
+      })
+      await page.clock.install({ time: new Date(beforeMidnight) })
+      await page.goto(origin)
+      const title = (await page.locator('#practice-question-title').textContent())!
+      await page.getByRole('textbox', { name: 'Your answer' }).fill(draft)
+      await page.getByRole('button', { name: 'Save draft' }).click()
+      await expect(page.getByRole('textbox', { name: 'Your answer' })).toHaveValue(draft)
+      const connection = await (await page.request.get(`${origin}/api/connection/status`)).json()
+      expect(connection.state).toBe('signed_out')
+
+      const history = page.getByRole('link', { name: 'History', exact: true })
+      await history.focus()
+      await expect(history).toBeFocused()
+      await page.keyboard.press('Enter')
+      await expect(page).toHaveURL(`${origin}/#/history`)
+      await expect(page.getByRole('heading', { name: 'History', exact: true })).toBeVisible()
+      const savedItem = page.getByRole('button', { name: title, exact: true })
+      await savedItem.focus()
+      await expect(savedItem).toBeFocused()
+      await page.keyboard.press('Enter')
+      await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible()
+      await page.getByText('Saved draft', { exact: true }).click()
+      await expect(page.getByText(draft, { exact: true })).toBeVisible()
+
+      const resume = page.getByRole('button', { name: 'Resume practice', exact: true })
+      await resume.focus()
+      await page.keyboard.press('Enter')
+      await expect(page).toHaveURL(new RegExp(`${origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/#/today/[a-f0-9-]{36}$`))
+      await expect(page.locator('#practice-question-title')).toHaveText(title)
+      await expect(page.getByRole('textbox', { name: 'Your answer' })).toHaveValue(draft)
+    } finally {
+      await writeFile(gate, 'cleanup')
+      if (child.pid && child.exitCode === null && child.signalCode === null) {
+        await new Promise<void>(done => {
+          const kill = setTimeout(() => child.kill('SIGKILL'), 5_000)
+          child.once('exit', () => { clearTimeout(kill); done() })
+          child.kill('SIGINT')
+        })
+      }
+      await rm(root, { recursive: true, force: true })
+    }
+  },
+)

@@ -2,6 +2,7 @@
 
 import base64
 import json
+import math
 from dataclasses import dataclass
 from datetime import date
 
@@ -11,6 +12,20 @@ from .scheduling import ReviewState, read_reviews
 
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 50
+
+# A recommendation alone records selection. History starts with the learner's
+# saved answer, draft, tracked help, or completed offline gap.
+_SAVED_ITEMS = """
+    FROM practice_items AS item
+    LEFT JOIN practice_submissions AS submission ON submission.item_id = item.id
+    LEFT JOIN practice_gap_completions AS gap ON gap.item_id = item.id
+"""
+_HAS_DRAFT = "length(trim(item.draft_text, char(9, 10, 11, 12, 13, 32))) > 0"
+_HAS_ACTIVITY = f"""(
+    submission.item_id IS NOT NULL OR gap.item_id IS NOT NULL
+    OR {_HAS_DRAFT}
+    OR EXISTS (SELECT 1 FROM practice_help_events AS help WHERE help.item_id = item.id)
+)"""
 
 
 class HistoryCursorInvalid(ValueError):
@@ -39,10 +54,8 @@ class HistoryEntry:
         Saved question title from the item snapshot.
     status : str
         Current durable work state suitable for an index label.
-    draft_text : str
-        Current locally saved draft text, if any.
     completed_date : str or None
-        Original completion date, if the learner submitted an answer.
+        Local completion date of the original answer or acknowledged gap.
     """
 
     item_id: str
@@ -53,7 +66,6 @@ class HistoryEntry:
     question_id: str
     title: str
     status: str
-    draft_text: str
     completed_date: str | None
 
 
@@ -121,7 +133,7 @@ class History:
             raise HistoryCursorInvalid(f"History page size must be between 1 and {MAX_PAGE_SIZE}.")
         marker = self._decode_cursor(cursor) if cursor is not None else None
 
-        predicates = []
+        predicates = [_HAS_ACTIVITY]
         parameters: dict[str, object] = {"limit": limit + 1}
         if section_id is not None:
             predicates.append("item.section_id = :section_id")
@@ -135,21 +147,27 @@ class History:
         if marker is not None:
             predicates.append("(item.created_at < :cursor_time OR (item.created_at = :cursor_time AND item.id < :cursor_id))")
             parameters.update(cursor_time=marker[0], cursor_id=marker[1])
-        where = " WHERE " + " AND ".join(predicates) if predicates else ""
+        where = " AND ".join(predicates)
         with self.database.connect() as connection:
             rows = connection.execute(f"""
                 SELECT item.id, item.local_date, item.created_at, item.section_id, item.section_title,
-                       item.question_id, json_extract(item.snapshot_json, '$.title'), item.draft_text,
-                       submission.completed_date, request.state
-                FROM practice_items AS item
-                LEFT JOIN practice_submissions AS submission ON submission.item_id = item.id
-                LEFT JOIN grading_requests AS request ON request.id = submission.current_request_id
-                {where}
+                       item.question_id, json_extract(item.snapshot_json, '$.title'),
+                       CASE WHEN gap.item_id IS NOT NULL THEN 'self_reported_gap'
+                            WHEN request.state = 'assessed' THEN 'assessed'
+                            WHEN submission.item_id IS NOT NULL THEN 'pending_assessment'
+                            WHEN {_HAS_DRAFT} THEN 'unfinished'
+                            ELSE 'support_viewed' END,
+                       COALESCE(gap.completed_date, submission.completed_date)
+                {_SAVED_ITEMS}
+                LEFT JOIN practice_revisions AS revision ON revision.item_id = item.id
+                LEFT JOIN grading_requests AS request
+                    ON request.id = COALESCE(revision.current_request_id, submission.current_request_id)
+                WHERE {where}
                 ORDER BY item.created_at DESC, item.id DESC
                 LIMIT :limit
             """, parameters).fetchall()
         has_next = len(rows) > limit
-        entries = tuple(self._entry(row) for row in rows[:limit])
+        entries = tuple(HistoryEntry(*row) for row in rows[:limit])
         next_cursor = self._encode_cursor(entries[-1]) if has_next else None
         return HistoryPage(entries, next_cursor)
 
@@ -162,10 +180,15 @@ class History:
             Distinct immutable section identifiers and saved display titles.
         """
         with self.database.connect() as connection:
-            rows = connection.execute("""
-                SELECT section_id, section_title
-                FROM practice_items
-                GROUP BY section_id, section_title
+            rows = connection.execute(f"""
+                SELECT section_id, section_title FROM (
+                    SELECT item.section_id, item.section_title,
+                           row_number() OVER (
+                               PARTITION BY item.section_id ORDER BY item.created_at DESC, item.id DESC
+                           ) AS position
+                    {_SAVED_ITEMS}
+                    WHERE {_HAS_ACTIVITY}
+                ) WHERE position = 1
                 ORDER BY section_title COLLATE NOCASE, section_id
             """).fetchall()
         return tuple(HistorySection(*row) for row in rows)
@@ -190,10 +213,12 @@ class History:
             If no saved practice item has the requested identity.
         """
         with self.database.connect() as connection:
-            connection.row_factory = None
-            row = connection.execute("""
-                SELECT id, local_date, section_title, snapshot_json, draft_text, draft_version
-                FROM practice_items WHERE id = ?
+            connection.execute("BEGIN")
+            row = connection.execute(f"""
+                SELECT item.id, item.local_date, item.section_title, item.snapshot_json,
+                       item.draft_text, item.draft_version
+                {_SAVED_ITEMS}
+                WHERE item.id = ? AND {_HAS_ACTIVITY}
             """, (item_id,)).fetchone()
             if row is None:
                 raise PracticeItemNotFound(item_id)
@@ -205,9 +230,7 @@ class History:
             reveals = [kind for kind, in connection.execute("""
                 SELECT kind FROM practice_help_events WHERE item_id = ? ORDER BY viewed_at, kind
             """, (saved_id,))]
-            gap_completed = connection.execute(
-                "SELECT 1 FROM practice_gap_completions WHERE item_id = ?", (saved_id,),
-            ).fetchone() is not None
+            gap_completed = submission is not None and submission["request"]["state"] == "self_reported_gap"
         request = submission["request"] if submission is not None else None
         return {
             "item": {"id": saved_id, "local_date": local_date, "submitted": submission is not None},
@@ -225,18 +248,6 @@ class History:
         }
 
     @staticmethod
-    def _entry(row: tuple) -> HistoryEntry:
-        """Convert one SQLite history row to its small index projection."""
-        item_id, local_date, created_at, section_id, section_title, question_id, title, draft, completed, state = row
-        if completed is None:
-            status = "unfinished" if draft.strip() else "not_started"
-        elif state == "assessed":
-            status = "assessed"
-        else:
-            status = "pending_assessment"
-        return HistoryEntry(item_id, local_date, created_at, section_id, section_title, question_id, title, status, draft, completed)
-
-    @staticmethod
     def _validate_date(value: str | None) -> date | None:
         """Parse an optional strict ISO date bound."""
         if value is None:
@@ -244,7 +255,10 @@ class History:
         if not isinstance(value, str):
             raise HistoryCursorInvalid("History dates must use ISO YYYY-MM-DD text.")
         try:
-            return date.fromisoformat(value)
+            parsed = date.fromisoformat(value)
+            if parsed.isoformat() != value:
+                raise ValueError("Date must use YYYY-MM-DD.")
+            return parsed
         except ValueError as error:
             raise HistoryCursorInvalid("History dates must use ISO YYYY-MM-DD text.") from error
 
@@ -261,9 +275,18 @@ class History:
             raise HistoryCursorInvalid("History cursor is invalid.")
         try:
             padding = "=" * (-len(value) % 4)
-            timestamp, item_id = json.loads(base64.urlsafe_b64decode(value + padding))
+            payload = json.loads(base64.b64decode(value + padding, altchars=b"-_", validate=True))
+            if not isinstance(payload, list) or len(payload) != 2:
+                raise ValueError("Invalid cursor structure.")
+            timestamp, item_id = payload
         except (ValueError, TypeError, json.JSONDecodeError) as error:
             raise HistoryCursorInvalid("History cursor is invalid.") from error
         if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool) or not isinstance(item_id, str) or not item_id:
             raise HistoryCursorInvalid("History cursor is invalid.")
-        return float(timestamp), item_id
+        try:
+            timestamp = float(timestamp)
+        except OverflowError as error:
+            raise HistoryCursorInvalid("History cursor is invalid.") from error
+        if not math.isfinite(timestamp):
+            raise HistoryCursorInvalid("History cursor is invalid.")
+        return timestamp, item_id
