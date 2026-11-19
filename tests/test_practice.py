@@ -248,3 +248,71 @@ def test_learning_timezone_controls_rollover_and_keeps_original_session_timezone
     assert returned.selections == paris.selections
     assert returned.timezone == "Europe/Paris"
     assert returned.effective_timezone == LONDON
+
+
+def test_long_imported_editorial_snapshot_can_be_submitted_after_bank_update(database):
+    bank = validate_bank()
+    source = bank.questions[0]
+    prompt = "Practice prompt. " * 130
+    reference = "Reference explanation. " * 100
+    description = "Check the explanation. " * 100
+    long_record = source.model_copy(update={
+        "version": 2, "prompt": prompt.strip(), "reference_explanation": reference.strip(),
+        "criteria": (source.criteria[0].model_copy(update={"description": description.strip()}),
+                     *source.criteria[1:]),
+    })
+    import_bank(database, bank.model_copy(update={"release": False, "questions": (long_record,)}))
+    practice = service(database)
+    selected = practice.add_item(LONDON, question_id=source.id)
+    shorter = source.model_copy(update={"version": 3})
+    import_bank(database, bank.model_copy(update={"release": False, "questions": (shorter,)}))
+
+    original = "  My exact, independently entered answer.  "
+    result = service(database).submit(
+        selected.item_id, original, expected_version=0, resolve_settings=lambda _db: (LONDON, None),
+    )
+
+    assert result.submission["text"] == original
+    assert result.submission["credited"] is True
+    assert result.submission["request"]["state"] == "awaiting_access"
+    assert result.today.completion_counts == {"2026-11-16": 1}
+    with database.connect() as connection:
+        row = connection.execute(
+            "SELECT kind, context_json FROM grading_requests WHERE id = ?",
+            (result.submission["request"]["id"],),
+        ).fetchone()
+    assert row[0] == "practice"
+    context = json.loads(row[1])
+    assert context["version"] == "v2"
+    assert context["question"] == prompt.strip()
+    assert context["reference"] == reference.strip()
+    assert context["criteria"][0]["description"] == description.strip()
+    assert context["answer"] == original
+
+
+def test_focused_section_resumes_unfinished_draft_after_another_question_is_submitted(database):
+    practice = service(database)
+    finished = practice.add_item(LONDON, question_id="forest-mechanics").item_id
+    unfinished = practice.add_item(LONDON, question_id="tree-diversity").item_id
+    practice.submit(finished, "Original.", expected_version=0, resolve_settings=lambda _db: (LONDON, None))
+    practice.save_draft(unfinished, "An unfinished answer.", expected_version=0, timezone=LONDON)
+
+    focused = practice.add_item(LONDON, section_id="forests")
+
+    assert focused.item_id == unfinished
+    assert focused.message is None
+    item = next(choice.item for choice in focused.today.selections if choice.item.id == unfinished)
+    assert item.draft.text == "An unfinished answer."
+
+
+def test_focused_section_reports_when_no_further_questions_are_editable(database):
+    practice = service(database)
+    for question_id in ("forest-mechanics", "tree-diversity"):
+        item_id = practice.add_item(LONDON, question_id=question_id).item_id
+        practice.submit(item_id, "Original.", expected_version=0, resolve_settings=lambda _db: (LONDON, None))
+
+    focused = practice.add_item(LONDON, section_id="forests")
+
+    assert focused.item_id is None
+    assert "no more editable questions" in focused.message.lower()
+    assert focused.today.goal == 2

@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
+import type { SavedSubmission } from './PracticeFeedback'
 
 const item = (id: string, title: string, text = '', version = 0, date = '2026-11-19') => ({
   id,
@@ -12,6 +13,7 @@ const item = (id: string, title: string, text = '', version = 0, date = '2026-11
   },
   draft: { text, version },
   submitted: false,
+  grading_status: null as string | null,
 })
 
 function practiceApi(
@@ -27,7 +29,7 @@ function practiceApi(
     goal: 2, answer_limit: 8000, shortage: null,
     selections: [first, second].map(item => ({ item, kind: 'variety' })),
     unfinished: resumed ? [resumed] : [],
-    submitted: [],
+    submitted: [] as ReturnType<typeof item>[],
     completion_counts: {} as Record<string, number>,
     first_use_date: '2026-11-19',
   }
@@ -250,5 +252,183 @@ describe('Today practice editor', () => {
     expect(screen.getByText('State the split.')).toBeTruthy()
     expect(screen.getByRole('link', { name: 'reading', hidden: true })).toHaveProperty('href', 'https://example.org/')
     expect(fetch.mock.calls.filter(([path]) => path.endsWith('/retry') || path.endsWith('/submit'))).toHaveLength(0)
+  })
+})
+
+type TestDraft = { text: string; version: number }
+const originalClarifiedAnswer = 'Keep separate data.'
+const clarificationRequest: SavedSubmission['request'] = { id: 'clarification', state: 'needs_clarification',
+  feedback: { status: 'needs_clarification', explanation: 'What was held out?' },
+  message: null, grade: null, can_send: false, reference: { sources: {} },
+}
+
+function clarificationApi(
+  save?: (edit: TestDraft) => Response,
+  read?: (result: Response) => Response | Promise<Response>,
+) {
+  let draft: TestDraft | null = { text: originalClarifiedAnswer, version: 0 }
+  let request: SavedSubmission['request'] = clarificationRequest
+  let assessedText = originalClarifiedAnswer
+  const result = () => Response.json({
+    text: originalClarifiedAnswer, assessed_text: assessedText, credited: true,
+    completed_date: '2026-11-19', completed_timezone: 'Europe/London',
+    request, clarification_draft: draft,
+  })
+  const api = practiceApi(undefined, undefined, (path, options) => {
+    if (path === '/api/practice/items/first/submission') return read ? read(result()) : result()
+    if (path === '/api/practice/items/first/clarification-draft' && options?.method === 'PUT') {
+      const edit = JSON.parse(String(options.body))
+      expect(edit.request_id).toBe('clarification')
+      if (save) return save(edit)
+      if (!draft || edit.version !== draft.version) return Response.json({ saved: draft }, { status: 409 })
+      draft = { text: edit.text, version: draft.version + 1 }
+      return Response.json(draft)
+    }
+    if (path === '/api/practice/items/first/retry' && options?.method === 'POST') {
+      const edit = JSON.parse(String(options.body))
+      expect(edit.request_id).toBe('clarification')
+      expect({ text: edit.text, version: edit.version }).toEqual(draft)
+      assessedText = edit.text
+      draft = null
+      request = { ...request, id: 'continued', state: 'in_flight', feedback: null }
+      return result()
+    }
+    throw new Error(`Unexpected request ${path}`)
+  })
+  const first = api.today.selections[0].item
+  api.today.selections[0].item = { ...first, submitted: true, grading_status: 'needs_clarification' }
+  return api
+}
+
+describe('Clarification draft', () => {
+  it('warns before unloading with unsaved changes and restores an explicit save after refresh', async () => {
+    clarificationApi()
+    const { unmount } = render(<App />)
+    const editor = await screen.findByRole('textbox', { name: 'Clarified answer' })
+    const text = 'Hold back a separately collected test set.'
+    fireEvent.change(editor, { target: { value: text } })
+    expect(window.dispatchEvent(new Event('beforeunload', { cancelable: true }))).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }))
+    await screen.findByText('Draft saved.')
+    expect(window.dispatchEvent(new Event('beforeunload', { cancelable: true }))).toBe(true)
+
+    unmount()
+    render(<App />)
+    expect(await screen.findByRole('textbox', { name: 'Clarified answer' })).toHaveProperty('value', text)
+    expect(screen.getByText(originalClarifiedAnswer)).toBeTruthy()
+  })
+
+  it('saves clarification before switching away and reloads it when the learner returns', async () => {
+    clarificationApi()
+    render(<App />)
+    const editor = await screen.findByRole('textbox', { name: 'Clarified answer' })
+    const text = 'Reserve data for a single final evaluation.'
+    fireEvent.change(editor, { target: { value: text } })
+
+    fireEvent.click(screen.getByRole('button', { name: /Data leakage/ }))
+    await screen.findByRole('heading', { name: 'Data leakage' })
+    fireEvent.click(screen.getByRole('button', { name: /Generalisation/ }))
+
+    expect(await screen.findByRole('textbox', { name: 'Clarified answer' })).toHaveProperty('value', text)
+  })
+
+  it('keeps a clarification and focus on the failed save when leaving Today', async () => {
+    let failures = true
+    clarificationApi(edit => failures
+      ? Response.json({ detail: 'Database unavailable.' }, { status: 503 })
+      : Response.json({ text: edit.text, version: 1 }))
+    render(<App />)
+    const editor = await screen.findByRole('textbox', { name: 'Clarified answer' })
+    const text = 'Keep editing until the database is reachable.'
+    fireEvent.change(editor, { target: { value: text } })
+
+    fireEvent.click(screen.getByRole('link', { name: 'Settings' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('Could not save your clarification draft.')
+    expect(document.activeElement).toBe(alert)
+    expect(editor).toHaveProperty('value', text)
+    expect(screen.queryByRole('heading', { name: 'Settings' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Copy my answer' })).toBeTruthy()
+
+    failures = false
+    fireEvent.click(screen.getByRole('button', { name: 'Retry save' }))
+    await screen.findByText('Draft saved.')
+    expect(editor).toHaveProperty('value', text)
+  })
+
+  it('preserves an acknowledged clarification when an older status read arrives after it', async () => {
+    let pendingRead: (() => void) | undefined
+    let reads = 0
+    clarificationApi(undefined, result => {
+      reads += 1
+      if (reads !== 2) return result
+      return new Promise(resolve => { pendingRead = () => resolve(result) })
+    })
+    render(<App />)
+    await screen.findByRole('textbox', { name: 'Clarified answer' })
+    fireEvent.click(screen.getByRole('link', { name: 'Settings' }))
+    await screen.findByRole('heading', { name: 'Settings' })
+    fireEvent.click(screen.getByRole('link', { name: 'Today' }))
+    await waitFor(() => expect(pendingRead).toBeDefined())
+    const editor = screen.getByRole('textbox', { name: 'Clarified answer' })
+    const text = 'Keep the latest acknowledged clarification.'
+    fireEvent.change(editor, { target: { value: text } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }))
+    await screen.findByText('Draft saved.')
+
+    await act(async () => { pendingRead?.() })
+
+    expect(editor).toHaveProperty('value', text)
+  })
+
+  it('saves the latest clarification before sending it and updates the selected grading label', async () => {
+    clarificationApi()
+    render(<App />)
+    const editor = await screen.findByRole('textbox', { name: 'Clarified answer' })
+    fireEvent.change(editor, { target: { value: 'Use a held-out test set only after selecting the model.' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send clarified answer' }))
+
+    await screen.findByRole('button', { name: /Generalisation.*Grading in progress/ })
+    expect(screen.queryByRole('textbox', { name: 'Clarified answer' })).toBeNull()
+    expect(screen.getByText(originalClarifiedAnswer)).toBeTruthy()
+  })
+
+  it('shows both versions on a clarification save conflict and allows saving the local alternative', async () => {
+    clarificationApi(edit => edit.version === 0
+      ? Response.json({ detail: 'This draft changed in another tab.', saved: {
+        text: 'The newer draft stored by another tab.', version: 1,
+      } }, { status: 409 })
+      : Response.json({ text: edit.text, version: 2 }))
+    render(<App />)
+    const editor = await screen.findByRole('textbox', { name: 'Clarified answer' })
+    const text = 'Keep this distinct local clarification.'
+    fireEvent.change(editor, { target: { value: text } })
+
+    fireEvent.click(screen.getByRole('button', { name: /Data leakage/ }))
+    expect(await screen.findByRole('textbox', { name: 'Saved in another tab' }))
+      .toHaveProperty('value', 'The newer draft stored by another tab.')
+    expect(editor).toHaveProperty('value', text)
+    expect(screen.getByRole('heading', { name: 'Generalisation' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Save my version' }))
+    await screen.findByText('Draft saved.')
+    expect(editor).toHaveProperty('value', text)
+  })
+})
+
+describe('Practice session grading summaries', () => {
+  it('shows distinct grading states for selected and previous submissions in both selectors', async () => {
+    const { today, fetch } = clarificationApi()
+    today.submitted.push({
+      ...item('previous', 'Model monitoring', '', 0, '2026-11-18'),
+      submitted: true, grading_status: 'failed_recoverable',
+    })
+    render(<App />)
+
+    expect(await screen.findByRole('button', { name: /Generalisation.*Needs clarification/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Model monitoring.*Needs retry/ })).toBeTruthy()
+    const select = screen.getByRole('combobox', { name: 'Session question' })
+    expect(within(select).getByRole('option', { name: /Generalisation.*Needs clarification/ })).toBeTruthy()
+    expect(within(select).getByRole('option', { name: /Model monitoring.*Needs retry/ })).toBeTruthy()
+    expect(fetch.mock.calls.some(([path]) => path === '/api/practice/items/previous/submission')).toBe(false)
   })
 })

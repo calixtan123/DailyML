@@ -85,6 +85,12 @@ class DraftEdit(BaseModel):
     version: int = Field(ge=0, le=2**63 - 1)
 
 
+class ClarificationDraftEdit(DraftEdit):
+    """Save a draft for the displayed clarification request."""
+
+    request_id: UUID = Field(strict=False)
+
+
 class SubmitAction(DraftEdit):
     """One explicit request to save the current editor text as the original."""
 
@@ -97,6 +103,7 @@ class RetryPractice(BaseModel):
     model_config = ConfigDict(extra="forbid")
     request_id: UUID
     text: str | None = None
+    version: int = Field(default=0, strict=True, ge=0, le=2**63 - 1)
     idempotency_key: str = Field(min_length=1, max_length=128)
 
 
@@ -431,11 +438,19 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
     def retry_practice(item_id: UUID, action: RetryPractice, request: Request, background: BackgroundTasks) -> dict:
         """Send or clarify a saved answer only after an explicit recovery action."""
         submission, dispatch_id = practice.retry_submission(
-            str(item_id), str(action.request_id), action.text, resolve_settings=submission_settings,
+            str(item_id), str(action.request_id), action.text,
+            expected_version=action.version, resolve_settings=submission_settings,
         )
         if dispatch_id:
             background.add_task(request.app.state.grading.run_pending, dispatch_id)
         return submission
+
+    @app.put("/api/practice/items/{item_id}/clarification-draft")
+    def save_clarification_draft(item_id: UUID, edit: ClarificationDraftEdit) -> Draft:
+        """Save exact clarification text locally without requesting grading."""
+        return practice.save_clarification_draft(
+            str(item_id), str(edit.request_id), edit.text, expected_version=edit.version,
+        )
 
     @app.post("/api/practice/today")
     def open_today() -> PracticeToday:

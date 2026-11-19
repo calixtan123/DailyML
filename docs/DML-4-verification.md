@@ -44,3 +44,17 @@ Command (exit 0)
 ```sh
 node /private/tmp/dml-native-zoom-efj_v_i8/verify.cjs /private/tmp/dml4-history-verify.o2fM5aQ5/venv/bin/daily-ml
 ```
+
+## Whole-branch review follow-up
+
+When a section's questions are already in the session, the section action resumes an unfinished draft first. It offers another editable item if none has a draft and explains when all questions in the section are complete. Regression tests cover resuming the unfinished alternative and showing the shortage while retaining the daily goal of two.
+
+| Command | Result |
+| --- | --- |
+| `/private/tmp/dml45-final.69bO01/venv/bin/python -m pytest -q --tb=short` | 225 passed in 21.64 s, exit 0, against the freshly built and installed wheel. |
+| `npm --prefix frontend test -- --run` | 44 passed across five files, exit 0. |
+| `npm --prefix frontend run typecheck` and `npm --prefix frontend run build` | Both exited 0. |
+| `/private/tmp/dml45-final.69bO01/venv/bin/python scripts/smoke_installed.py /private/tmp/dml45-final.69bO01/*.whl /private/tmp/dml45-final.69bO01/venv/bin/daily-ml` | Wheel and installed launcher passed, exit 0. |
+| `DML_E2E_EXECUTABLE=/private/tmp/dml45-final.69bO01/venv/bin/daily-ml npm --prefix frontend run test:e2e -- --output=/private/tmp/dml45-final.69bO01/browser-results` | Two offline Chromium journeys passed in 5.1 s, exit 0, including the installed-app draft and Settings journey. |
+
+The browser journeys used temporary local data and simulated grading. The responsive screenshots and 200% browser zoom evidence above are from the earlier review round.

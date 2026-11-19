@@ -32,3 +32,17 @@ The answer editor shows which data OpenAI receives for grading and uses the same
 | `npm --prefix frontend test -- --run` (after the fix) | 37 passed across five files, exit 0. |
 | `npm --prefix frontend run typecheck` | Exit 0. |
 | `npm --prefix frontend run build` | Exit 0. |
+
+## Whole-branch review follow-up
+
+An original answer can be stored and credited against an imported question snapshot with long editorial text, even if the bank has since been updated. A clarification has its own versioned SQLite draft. The editor saves before leaving the question or Today, warns on unload when there are unsaved changes, and preserves text on failure or a concurrent edit. Sending uses the verified draft version and preserves the original answer, completion date and credit. Both session selectors show the latest known grading state for submitted items. Only the active request is polled.
+
+| Command | Result |
+| --- | --- |
+| `/private/tmp/dml45-final.69bO01/venv/bin/python -m pytest -q --tb=short` | 225 passed in 21.64 s, exit 0, against the freshly built and installed wheel. Covers the saved snapshot, clarification backup and restore, stale saves and sends, and credit preservation. |
+| `npm --prefix frontend test -- --run` | 44 passed across five files, exit 0. Covers clarification save, reload, navigation, failure, conflict, delayed status reads, send and grading labels. |
+| `npm --prefix frontend run typecheck` and `npm --prefix frontend run build` | Both exited 0. |
+| `/private/tmp/dml45-final.69bO01/venv/bin/python scripts/smoke_installed.py /private/tmp/dml45-final.69bO01/*.whl /private/tmp/dml45-final.69bO01/venv/bin/daily-ml` | Wheel and installed launcher passed, exit 0. |
+| `DML_E2E_EXECUTABLE=/private/tmp/dml45-final.69bO01/venv/bin/daily-ml npm --prefix frontend run test:e2e -- --output=/private/tmp/dml45-final.69bO01/browser-results` | Two offline Chromium journeys passed in 5.1 s, exit 0, including two tabs submitting across London midnight and reopening saved feedback. |
+
+Grading was simulated. Live ChatGPT-plan grading remains pending under DML-2. Clarification interactions were verified in frontend tests. The Chromium journeys covered installed submission and navigation behavior.

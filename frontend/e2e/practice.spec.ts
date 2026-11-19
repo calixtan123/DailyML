@@ -64,7 +64,7 @@ test('Two tabs complete one saved original after London midnight and reopen feed
       expect(actionKeys.size).toBe(2)
       for (const tab of [page, second]) {
         await expect(tab.getByText('1 of 2 completed today')).toBeVisible()
-        await expect(tab.getByText('Grading in progress')).toBeVisible()
+        await expect(tab.getByRole('article').getByText('Grading in progress')).toBeVisible()
         await expect(tab.getByText('2026-03-30', { exact: true })).toBeVisible()
         await expect(tab.getByText(answer, { exact: true })).toBeVisible()
       }
@@ -79,7 +79,7 @@ test('Two tabs complete one saved original after London midnight and reopen feed
       await writeFile(gate, 'complete')
       await page.reload()
       const submitted = page.getByRole('complementary', { name: 'Today’s session' })
-        .getByRole('button', { name: title, exact: true })
+        .getByRole('button', { name: title })
       await submitted.click()
       await expect(page.getByText('Grade 3 of 3')).toBeVisible()
       await expect(page.getByText('Give a concrete example.')).toBeVisible()

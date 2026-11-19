@@ -29,7 +29,7 @@ _STARTER_CONCEPTS = {
     "mlops": {"reproducible-preprocessing", "production-monitoring"},
 }
 
-_TEXT = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+EditorialText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 _ID = Annotated[str, StringConstraints(pattern=ID_PATTERN, max_length=_MAX_ID_LENGTH)]
 _POSITIVE_INT = Annotated[int, Field(strict=True, ge=1, le=2**63 - 1)]
 _DIFFICULTY = Literal["introductory", "intermediate", "advanced"]
@@ -85,7 +85,7 @@ class _Section(_ValidatedRecord):
     """An ordered topic section with the concepts it owns."""
 
     id: _ID
-    title: _TEXT
+    title: EditorialText
     concepts: Annotated[tuple[_ID, ...], Field(min_length=1)]
 
 
@@ -115,7 +115,7 @@ class _Criterion(_ValidatedRecord):
     """A distinct, weighted rubric requirement."""
 
     id: _ID
-    description: _TEXT
+    description: EditorialText
     weight: _WEIGHT
 
 
@@ -123,8 +123,8 @@ class _Source(_ValidatedRecord):
     """An editorial source and the objective or criteria it supports."""
 
     id: _ID
-    title: _TEXT
-    url: _TEXT
+    title: EditorialText
+    url: EditorialText
     reviewed_on: date
     supports: Annotated[tuple[_ID, ...], Field(min_length=1)]
 
@@ -176,15 +176,15 @@ class _Question(_ValidatedRecord):
     tags: Annotated[tuple[_ID, ...], Field(min_length=1)]
     difficulty: _DIFFICULTY
     question_type: Literal["explanation", "comparison", "scenario"]
-    title: _TEXT
-    prompt: _TEXT
-    objective: _TEXT
-    expected_scope: _TEXT
+    title: EditorialText
+    prompt: EditorialText
+    objective: EditorialText
+    expected_scope: EditorialText
     expected_answer_words: tuple[_POSITIVE_INT, _POSITIVE_INT]
-    hint: _TEXT
-    reference_explanation: _TEXT
+    hint: EditorialText
+    reference_explanation: EditorialText
     criteria: Annotated[tuple[_Criterion, ...], Field(min_length=1, max_length=8)]
-    critical_misconceptions: Annotated[tuple[_TEXT, ...], Field(min_length=1)]
+    critical_misconceptions: Annotated[tuple[EditorialText, ...], Field(min_length=1)]
     sources: Annotated[tuple[_Source, ...], Field(min_length=1)]
     retired: Annotated[bool, Field(strict=True)]
 

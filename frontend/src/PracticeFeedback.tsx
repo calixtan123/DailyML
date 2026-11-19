@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { type RefObject, useEffect, useRef, useState } from 'react'
 import { LocalApiError, type LocalRequest } from './api'
+import { ClarificationEditor } from './ClarificationEditor'
+import type { Draft, LeaveEditor } from './drafts'
 
 type Feedback = {
   status: 'assessed'
@@ -22,6 +24,7 @@ const REQUEST_LABELS = {
   failed_recoverable: 'Grading needs a retry',
   assessed: 'Grading complete',
 }
+export type GradingStatus = keyof typeof REQUEST_LABELS | 'ready_to_send'
 type GradingRequest = {
   id: string
   state: keyof typeof REQUEST_LABELS
@@ -39,6 +42,7 @@ export type SavedSubmission = {
   completed_timezone: string
   credited: boolean
   request: GradingRequest
+  clarification_draft: Draft | null
 }
 
 const POLL_MS = 500
@@ -80,39 +84,50 @@ function Assessment({ job, feedback }: { job: GradingRequest; feedback: Extract<
 }
 
 /** Read saved feedback and poll only while the displayed request is active. */
-export function PracticeFeedback({ itemId, request, active, initial, answerLimit }: {
+export function PracticeFeedback({ itemId, request, active, initial, answerLimit, leaveEditor, onStatus }: {
   itemId: string
   request: LocalRequest
   active: boolean
   initial?: SavedSubmission
   answerLimit: number
+  leaveEditor: RefObject<LeaveEditor | null>
+  onStatus: (itemId: string, status: GradingStatus) => void
 }) {
   const [submission, setSubmission] = useState(initial)
   const [reload, setReload] = useState(0)
   const [readError, setReadError] = useState(false)
   const [actionError, setActionError] = useState('')
   const [busy, setBusy] = useState(false)
-  const [clarification, setClarification] = useState<string>()
   const action = useRef<AbortController | undefined>(undefined)
+  const actionVersion = useRef(0)
   const base = `/api/practice/items/${itemId}`
   const job = submission?.request
 
   useEffect(() => () => action.current?.abort(), [])
 
   useEffect(() => {
-    if (!active || busy) return
+    if (!active) return
+    const version = actionVersion.current
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout>
     const refresh = async () => {
       try {
         const saved = await request<SavedSubmission | null>(`${base}/submission`, { signal: controller.signal })
-        if (controller.signal.aborted) return
+        if (controller.signal.aborted || version !== actionVersion.current) return
         if (!saved) throw new Error('Submitted answer unavailable')
-        setSubmission(saved)
+        setSubmission(previous => {
+          const draft = previous?.clarification_draft
+          if (previous?.request.id === saved.request.id && draft && saved.clarification_draft
+              && draft.version > saved.clarification_draft.version) {
+            return { ...saved, clarification_draft: draft }
+          }
+          return saved
+        })
+        onStatus(itemId, saved.request.can_send ? 'ready_to_send' : saved.request.state)
         setReadError(false)
         if (isActive(saved.request)) timer = setTimeout(refresh, POLL_MS)
       } catch {
-        if (!controller.signal.aborted) setReadError(true)
+        if (!controller.signal.aborted && version === actionVersion.current) setReadError(true)
       }
     }
     // On reopening, load SQLite once even for settled answers. Later reads
@@ -122,40 +137,51 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
       clearTimeout(timer)
       controller.abort()
     }
-  }, [base, request, active, busy, reload])
+  }, [base, request, active, reload, itemId, onStatus])
 
-  async function send(text?: string) {
-    if (!job || busy) return
+  function refresh() {
+    setActionError('')
+    setReload(value => value + 1)
+  }
+
+  async function send(edit?: Draft) {
+    if (!job || action.current) return
     const controller = new AbortController()
     action.current = controller
+    actionVersion.current += 1
     setBusy(true)
     setActionError('')
     try {
       const saved = await request<SavedSubmission>(`${base}/retry`, {
         method: 'POST', signal: controller.signal, headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ request_id: job.id, text, idempotency_key: crypto.randomUUID() }),
+        body: JSON.stringify({ request_id: job.id, ...edit, idempotency_key: crypto.randomUUID() }),
       })
       if (controller.signal.aborted) return
       setSubmission(saved)
-      setClarification(undefined)
+      onStatus(itemId, saved.request.can_send ? 'ready_to_send' : saved.request.state)
+      refresh()
     } catch (error) {
-      if (!controller.signal.aborted) setActionError(error instanceof LocalApiError
-        ? error.message : 'Could not confirm the grading action. Refresh the status before trying again.')
+      if (!controller.signal.aborted) {
+        if (edit) throw error
+        setActionError(error instanceof LocalApiError
+          ? error.message : 'Could not confirm the grading action. Refresh the status before trying again.')
+      }
     } finally {
-      if (!controller.signal.aborted) setBusy(false)
+      if (!controller.signal.aborted) {
+        action.current = undefined
+        setBusy(false)
+      }
     }
   }
 
-  const clarificationText = clarification ?? submission?.assessed_text ?? ''
   return (
     <div className="today-editor practice-feedback">
       {(readError || actionError) && (
         <div className="actions">
           <p role="alert" className="error">{actionError || 'Could not refresh grading status.'}</p>
-          <button type="button" disabled={busy} onClick={() => {
-            setActionError('')
-            setReload(value => value + 1)
-          }}>Refresh grading status</button>
+          <button type="button" disabled={busy} onClick={() => void (async () => {
+            if (!leaveEditor.current || await leaveEditor.current()) refresh()
+          })()}>Refresh grading status</button>
         </div>
       )}
       {!job && !readError && <p role="status">Loading submitted answer…</p>}
@@ -177,18 +203,18 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
                   </button>
                 </div>
               )}
-              {job.feedback?.status === 'needs_clarification' && (
+              {job.feedback?.status === 'needs_clarification' && submission.clarification_draft && (
                 <div className="practice-clarification">
                   <p className="muted">AI-generated feedback</p>
                   <p>{job.feedback.explanation}</p>
-                  <label htmlFor="clarified-answer">Clarified answer</label>
-                  <textarea id="clarified-answer" rows={6} value={clarificationText} readOnly={busy}
-                    onChange={event => setClarification(event.target.value)} />
-                  <div className="actions">
-                    <button type="button" disabled={busy || !clarificationText.trim()
-                        || Array.from(clarificationText).length > answerLimit}
-                      onClick={() => void send(clarificationText)}>Send clarified answer</button>
-                  </div>
+                  <ClarificationEditor key={job.id} draft={submission.clarification_draft} answerLimit={answerLimit}
+                    leaveEditor={leaveEditor}
+                    save={edit => request<Draft>(`${base}/clarification-draft`, {
+                      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ request_id: job.id, ...edit }),
+                    })}
+                    onSaved={draft => setSubmission(previous => previous && { ...previous, clarification_draft: draft })}
+                    send={send} refresh={refresh} />
                 </div>
               )}
             </>

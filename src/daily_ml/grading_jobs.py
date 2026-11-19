@@ -30,6 +30,28 @@ class RetryConflict(ValueError):
     """The requested parent is missing, successful, or belongs to a different model."""
 
 
+def practice_grading_status(state: str, error: str | None) -> str:
+    """Summarize the learner-visible state of a practice grading request.
+
+    Parameters
+    ----------
+    state : str
+        Request state stored in the grading ledger.
+    error : str or None
+        Saved recovery reason, when present.
+
+    Returns
+    -------
+    str
+        A status for the practice selector, including a recovered unsent queue entry.
+    """
+    if state == "queued" and error == "unsent":
+        return "ready_to_send"
+    if state == "preparing":
+        return "in_flight"
+    return state
+
+
 def public_request(row: sqlite3.Row) -> dict:
     """Read only display-safe fields from the ledger."""
     result = {key: row[key] for key in ("id", "state", "model_id", "grade", "error", "retry_of", "schema_mode",
@@ -40,8 +62,9 @@ def public_request(row: sqlite3.Row) -> dict:
     result["usage"] = json.loads(row["usage_json"]) if row["usage_json"] else None
     if row["kind"] == "practice":
         result["model_id"] = row["model_id"] or None
-        result["state"] = "in_flight" if row["state"] == "preparing" else row["state"]
-        result["can_send"] = row["state"] == "queued" and row["error"] == "unsent"
+        status = practice_grading_status(row["state"], row["error"])
+        result["can_send"] = status == "ready_to_send"
+        result["state"] = "queued" if result["can_send"] else status
         result["reference"].pop("answer")
         result["message"] = PRACTICE_MESSAGES.get(row["error"], MESSAGES.get(row["error"]))
         return result

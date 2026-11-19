@@ -265,3 +265,68 @@ def test_clarification_keeps_original_date_and_credit_through_backup(learner, tm
     assert len(calls) == 2
     with restored.connect() as connection:
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_clarification_draft_survives_restore_and_cannot_be_overwritten_or_sent_by_stale_tab(learner, tmp_path):
+    client, headers, db, instants = learner
+    _configure_model(db)
+    calls = []
+
+    def clarify(outbound):
+        calls.append(outbound)
+        return response_stream(terminal(content=[{
+            "type": "output_text", "annotations": [],
+            "text": '{"feedback":{"status":"needs_clarification","explanation":"What was held out?"}}',
+        }]))
+
+    client.app.state.grading.provider = provider(clarify)
+    first, second = [entry["item"] for entry in _today(client, headers)["selections"]]
+    original = "Keep separate data."
+    _submit(client, headers, first["id"], original)
+    _submit(client, headers, second["id"], "A second original.")
+    base = f"/api/practice/items/{first['id']}"
+    submission = client.get(f"{base}/submission").json()
+    request_id = submission["request"]["id"]
+
+    assert submission["clarification_draft"] == {"text": original, "version": 0}
+    assert _today(client, headers)["selections"][0]["item"]["grading_status"] == "needs_clarification"
+    draft = "  Hold back a test set before fitting.  "
+    saved = client.put(f"{base}/clarification-draft", headers=headers,
+                       json={"request_id": request_id, "text": draft, "version": 0})
+    assert saved.status_code == 200
+    assert saved.json() == {"text": draft, "version": 1}
+    assert client.get(f"{base}/submission").json()["clarification_draft"] == saved.json()
+
+    restored = Database(tmp_path / "restored-draft")
+    with db.connect() as source, restored.connect() as destination:
+        source.backup(destination)
+    after_restart = Practice(restored, answer_limit=8000, clock=lambda: instants[0])
+    assert after_restart.submission(first["id"])["clarification_draft"] == saved.json()
+
+    stale = {"request_id": request_id, "version": 0, "text": "Other tab's older edit."}
+    conflict = client.put(f"{base}/clarification-draft", headers=headers, json=stale)
+    assert conflict.status_code == 409
+    assert conflict.json()["saved"] == saved.json()
+    stale_send = client.post(f"{base}/retry", headers=headers, json={**stale, "idempotency_key": "stale"})
+    assert stale_send.status_code == 409
+    assert stale_send.json()["saved"] == saved.json()
+    assert len(calls) == 2
+
+    too_long = client.put(f"{base}/clarification-draft", headers=headers,
+                          json={**stale, "version": 1, "text": "🧪" * 8001})
+    assert too_long.status_code == 422
+    sent = client.post(f"{base}/retry", headers=headers, json={
+        "request_id": request_id, "version": 1, "text": draft, "idempotency_key": "confirmed",
+    })
+    assert sent.status_code == 202
+    assert sent.json()["assessed_text"] == draft
+    assert sent.json()["text"] == original
+    assert sent.json()["request"]["retry_of"] == request_id
+    assert client.get(f"{base}/submission").json()["clarification_draft"] == {"text": draft, "version": 0}
+    assert _today(client, headers)["completion_counts"] == {"2026-03-28": 2}
+    assert len(calls) == 3
+
+    stale_request = client.put(f"{base}/clarification-draft", headers=headers,
+                               json={**stale, "version": 1})
+    assert stale_request.status_code == 409
+    assert client.get(f"{base}/submission").json()["clarification_draft"] == {"text": draft, "version": 0}

@@ -1,11 +1,11 @@
 import { Plus } from 'lucide-react'
-import { type RefObject, useEffect, useRef, useState } from 'react'
+import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
 import { LocalApiError, type LocalRequest } from './api'
+import { type Draft, type LeaveEditor, savedAlternative, useUnsavedDraftWarning } from './drafts'
 import { PracticeCalendar } from './PracticeCalendar'
-import { PracticeFeedback, type SavedSubmission } from './PracticeFeedback'
+import { PracticeFeedback, type GradingStatus, type SavedSubmission } from './PracticeFeedback'
 import { QuestionBrowser } from './QuestionBrowser'
 
-type Draft = { text: string; version: number }
 type PracticeItem = {
   id: string
   local_date: string
@@ -19,6 +19,7 @@ type PracticeItem = {
   }
   draft: Draft
   submitted: boolean
+  grading_status: GradingStatus | null
 }
 type Selection = { item: PracticeItem; kind: 'review' | 'variety' | 'extra' | 'focused' }
 type Session = {
@@ -42,7 +43,7 @@ type SaveState =
   | { kind: 'error'; message: string }
   | { kind: 'conflict'; saved: Draft }
   | { kind: 'submitted_elsewhere' }
-export type LeaveToday = () => Promise<boolean>
+export type LeaveToday = LeaveEditor
 
 const DATE_CHECK_MS = 60_000
 
@@ -65,11 +66,29 @@ function currentLocalDate(timeZone: string) {
   }
 }
 
-function savedAlternative(error: unknown): Draft | undefined {
-  if (!(error instanceof LocalApiError) || error.status !== 409) return undefined
-  const draft = error.payload?.saved as Partial<Draft> | undefined
-  if (!draft || typeof draft.text !== 'string' || !Number.isInteger(draft.version)) return undefined
-  return draft as Draft
+const SESSION_GRADING_LABELS: Record<GradingStatus, string> = {
+  awaiting_access: 'Waiting for access',
+  awaiting_allowance: 'Waiting for allowance',
+  queued: 'Grading queued',
+  in_flight: 'Grading in progress',
+  needs_clarification: 'Needs clarification',
+  outcome_unknown: 'Outcome unknown',
+  failed_recoverable: 'Needs retry',
+  ready_to_send: 'Ready to send',
+  assessed: 'Assessed',
+}
+
+function gradingLabel(item: PracticeItem) {
+  return item.grading_status ? SESSION_GRADING_LABELS[item.grading_status] : 'Submitted'
+}
+
+function updateGradingStatus(session: Session, itemId: string, status: GradingStatus): Session {
+  if (findItem(session, itemId)?.grading_status === status) return session
+  const update = (item: PracticeItem) => item.id === itemId ? { ...item, grading_status: status } : item
+  return {
+    ...session, submitted: session.submitted.map(update),
+    selections: session.selections.map(selection => ({ ...selection, item: update(selection.item) })),
+  }
 }
 
 function updateDraft(session: Session, id: string, draft: Draft): Session {
@@ -104,6 +123,8 @@ export function Today({ request, active, leaveToday }: {
   const [copyStatus, setCopyStatus] = useState('')
   const [browsing, setBrowsing] = useState(false)
   const [initialSubmission, setInitialSubmission] = useState<SavedSubmission>()
+  const feedbackLeave = useRef<LeaveEditor | null>(null)
+  const lastStatus = useRef<{ itemId: string; status: GradingStatus }>(undefined)
   const operation = useRef(false)
   const operationVersion = useRef(0)
   const heading = useRef<HTMLHeadingElement>(null)
@@ -113,6 +134,15 @@ export function Today({ request, active, leaveToday }: {
   const dirty = editor !== undefined && !editor.item.submitted && editor.text !== editor.item.draft.text
   const characterCount = Array.from(editor?.text ?? '').length
   const overLimit = session !== undefined && characterCount > session.answer_limit
+
+  const observeGradingStatus = useCallback((itemId: string, status: GradingStatus) => {
+    if (lastStatus.current?.itemId !== itemId || lastStatus.current?.status !== status) {
+      lastStatus.current = { itemId, status }
+    }
+    setSession(current => current && updateGradingStatus(current, itemId, status))
+    setEditor(current => current && current.item.id === itemId && current.item.grading_status !== status
+      ? { ...current, item: { ...current.item, grading_status: status } } : current)
+  }, [])
 
   useEffect(() => {
     if (!active) return
@@ -124,9 +154,14 @@ export function Today({ request, active, leaveToday }: {
       if (loading || operation.current) return
       loading = true
       const version = operationVersion.current
+      const priorStatus = lastStatus.current
       try {
-        const today = await request<Session>('/api/practice/today', { method: 'POST', signal: controller.signal })
+        let today = await request<Session>('/api/practice/today', { method: 'POST', signal: controller.signal })
         if (controller.signal.aborted || version !== operationVersion.current) return
+        const observed = lastStatus.current
+        if (observed && observed !== priorStatus) {
+          today = updateGradingStatus(today, observed.itemId, observed.status)
+        }
         lastSession = today
         setSession(today)
         setLoadError(false)
@@ -158,15 +193,7 @@ export function Today({ request, active, leaveToday }: {
     }
   }, [request, active, loadAttempt])
 
-  useEffect(() => {
-    if (!dirty) return
-    function warnOnUnload(event: BeforeUnloadEvent) {
-      event.preventDefault()
-      event.returnValue = true
-    }
-    window.addEventListener('beforeunload', warnOnUnload)
-    return () => window.removeEventListener('beforeunload', warnOnUnload)
-  }, [dirty])
+  useUnsavedDraftWarning(dirty)
 
   useEffect(() => {
     if (!focusQuestion.current) return
@@ -263,6 +290,7 @@ export function Today({ request, active, leaveToday }: {
     const saved = await run(async () => {
       if ((saveState.kind === 'conflict' || saveState.kind === 'submitted_elsewhere') && dirty) return false
       if (dirty && !await persistDraft()) return false
+      if (feedbackLeave.current && !await feedbackLeave.current()) return false
       setActionError('')
       await action?.()
       return true
@@ -310,6 +338,7 @@ export function Today({ request, active, leaveToday }: {
     void afterDraftSaved(() => {
       showItem(item)
       setNotice('')
+      retryToday()
     })
   }
 
@@ -357,7 +386,7 @@ export function Today({ request, active, leaveToday }: {
                     if (item) selectItem(item)
                   }}>
                   {selections.map(({ item }) => <option key={item.id} value={item.id}>
-                    {item.question.title}{item.submitted ? ' (Submitted)' : ''}
+                    {item.question.title}{item.submitted ? ` · ${gradingLabel(item)}` : ''}
                   </option>)}
                   {resumable.length > 0 && (
                     <optgroup label="Resume practice">
@@ -366,7 +395,9 @@ export function Today({ request, active, leaveToday }: {
                   )}
                   {submittedItems.length > 0 && (
                     <optgroup label="Submitted answers">
-                      {submittedItems.map(item => <option key={item.id} value={item.id}>{item.question.title}</option>)}
+                      {submittedItems.map(item => <option key={item.id} value={item.id}>
+                        {item.question.title} · {gradingLabel(item)}
+                      </option>)}
                     </optgroup>
                   )}
                 </select>
@@ -380,7 +411,7 @@ export function Today({ request, active, leaveToday }: {
                         <span className="session-order" aria-hidden="true">{index + 1}</span>
                         <span>{item.question.title}<span className="session-kind">
                           {{ review: 'Due review', variety: 'Recommendation', extra: 'Extra practice', focused: 'Focused practice' }[kind]}
-                          {item.submitted && ' · Submitted'}
+                          {item.submitted && ` · ${gradingLabel(item)}`}
                         </span></span>
                       </button>
                     </li>
@@ -409,7 +440,7 @@ export function Today({ request, active, leaveToday }: {
                         <li key={item.id}>
                           <button type="button" disabled={controlsDisabled} onClick={() => selectItem(item)}
                             aria-current={editor?.item.id === item.id ? 'true' : undefined}>
-                            {item.question.title}
+                            <span>{item.question.title}<span className="session-kind">{gradingLabel(item)}</span></span>
                           </button>
                         </li>
                       ))}
@@ -435,7 +466,8 @@ export function Today({ request, active, leaveToday }: {
             </header>
             {editor.item.submitted ? (
               <PracticeFeedback key={editor.item.id} itemId={editor.item.id} request={request} active={active}
-                initial={initialSubmission} answerLimit={session.answer_limit} />
+                initial={initialSubmission} answerLimit={session.answer_limit}
+                leaveEditor={feedbackLeave} onStatus={observeGradingStatus} />
             ) : <div className="today-editor">
               <div className="today-editor-label">
                 <label htmlFor="practice-answer">Your answer</label>

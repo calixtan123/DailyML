@@ -3,7 +3,7 @@
 import json
 import sqlite3
 from collections.abc import Callable, Collection, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone as utc
 from random import choice
 from typing import Literal
@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 from .bank import SectionNotFound
 from .database import Database
 from .grading import GradingContext
-from .grading_jobs import enqueue_practice_request, public_request
+from .grading_jobs import enqueue_practice_request, practice_grading_status, public_request
 
 DAILY_GOAL = 2
 SelectionKind = Literal["review", "variety", "extra", "focused"]
@@ -95,6 +95,13 @@ _SCHEMA = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS practice_credits_by_date ON practice_credits(local_date)",
+    """
+    CREATE TABLE IF NOT EXISTS practice_clarification_drafts (
+        request_id TEXT PRIMARY KEY REFERENCES grading_requests(id),
+        text TEXT NOT NULL,
+        version INTEGER NOT NULL CHECK (version > 0)
+    )
+    """,
 )
 
 
@@ -151,6 +158,7 @@ class PracticeItem:
     question: PracticeQuestion
     draft: Draft
     submitted: bool = False
+    grading_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -338,7 +346,9 @@ class Practice:
                 item_id = self._unfinished_item_id(connection, question_id, today_item_id) or today_item_id
                 message = None
             else:
-                item_id = self._existing_focused_item(candidates, existing) if section_id else None
+                item_id = (
+                    self._existing_focused_item(connection, day, candidates, existing) if section_id else None
+                )
                 message = None if item_id else self._exhausted_message(section_id)
             result = PracticeAddition(self._today(connection, day), item_id, message)
         return result
@@ -502,12 +512,86 @@ class Practice:
                 raise PracticeItemNotFound(item_id)
             return self._read_submission(connection, item_id)
 
+    def save_clarification_draft(
+        self, item_id: str, request_id: str, text: str, *, expected_version: int,
+    ) -> Draft:
+        """Save an edit for the current clarification request without sending it.
+
+        Parameters
+        ----------
+        item_id : str
+            Stable practice item ID.
+        request_id : str
+            Grading request that asked for clarification.
+        text : str
+            Exact editor text.
+        expected_version : int
+            The editor's last observed clarification draft version.
+
+        Returns
+        -------
+        Draft
+            Committed text and version.
+
+        Raises
+        ------
+        DraftInvalid
+            Text exceeds the configured limit or is invalid Unicode.
+        PracticeItemNotFound
+            The practice item has no saved original.
+        SubmissionConflict
+            The displayed request no longer accepts a clarification.
+        DraftConflict
+            The draft changed in another tab.
+        """
+        self._validate_text(text)
+        with self.database.connect(immediate=True) as connection:
+            current = self._current_request(connection, item_id)
+            if current["id"] != request_id or current["state"] != "needs_clarification":
+                raise SubmissionConflict("This clarification is no longer open. Copy your text before refreshing grading.")
+            assessed_text = json.loads(current["context_json"])["answer"]
+            saved = self._clarification_draft(connection, request_id, assessed_text)
+            if saved.version != expected_version:
+                raise DraftConflict(saved)
+            if saved.text == text:
+                return saved
+            result = Draft(text, saved.version + 1)
+            connection.execute(
+                """INSERT INTO practice_clarification_drafts (request_id, text, version)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(request_id) DO UPDATE SET text = excluded.text, version = excluded.version""",
+                (request_id, result.text, result.version),
+            )
+        return result
+
+    @staticmethod
+    def _current_request(connection: sqlite3.Connection, item_id: str) -> sqlite3.Row:
+        """Read the exact request that currently owns grading for this original."""
+        connection.row_factory = sqlite3.Row
+        current = connection.execute(
+            """SELECT r.* FROM practice_submissions s
+               JOIN grading_requests r ON r.id = s.current_request_id WHERE s.item_id = ?""",
+            (item_id,),
+        ).fetchone()
+        if current is None:
+            raise PracticeItemNotFound(item_id)
+        return current
+
+    @staticmethod
+    def _clarification_draft(connection: sqlite3.Connection, request_id: str, assessed_text: str) -> Draft:
+        """Load the draft, using the previously sent answer as the first editable version."""
+        row = connection.execute(
+            "SELECT text, version FROM practice_clarification_drafts WHERE request_id = ?", (request_id,),
+        ).fetchone()
+        return Draft(*row) if row is not None else Draft(assessed_text, 0)
+
     def retry_submission(
         self,
         item_id: str,
         request_id: str,
         text: str | None,
         *,
+        expected_version: int = 0,
         resolve_settings: Callable[[sqlite3.Connection], tuple[str, str | None]],
     ) -> tuple[dict, str | None]:
         """Create one explicit continuation of the displayed grading request.
@@ -520,6 +604,8 @@ class Practice:
             The exact request the learner chose to resume or clarify.
         text : str or None
             Replacement answer only when the model requested clarification.
+        expected_version : int
+            Last observed clarification draft version, zero before the first save.
         resolve_settings : callable
             Resolve effective settings using the active transaction.
 
@@ -532,6 +618,8 @@ class Practice:
         ------
         DraftInvalid
             A supplied clarification violates the answer requirements.
+        DraftConflict
+            The clarification draft changed in another tab.
         SubmissionConflict
             The displayed request has changed or cannot accept the action.
         PracticeItemNotFound
@@ -540,14 +628,7 @@ class Practice:
         if text is not None:
             self._validate_text(text, submitted=True)
         with self.database.connect(immediate=True) as connection:
-            connection.row_factory = sqlite3.Row
-            current = connection.execute(
-                """SELECT r.* FROM practice_submissions s
-                   JOIN grading_requests r ON r.id = s.current_request_id WHERE s.item_id=?""",
-                (item_id,),
-            ).fetchone()
-            if current is None:
-                raise PracticeItemNotFound(item_id)
+            current = self._current_request(connection, item_id)
             if current["id"] != request_id:
                 if current["retry_of"] == request_id and (
                     text is None or json.loads(current["context_json"])["answer"] == text
@@ -564,6 +645,9 @@ class Practice:
                 raise SubmissionConflict("Choose a model in Settings before sending your saved answer.")
             context = GradingContext.model_validate_json(current["context_json"])
             if text is not None:
+                draft = self._clarification_draft(connection, request_id, context.answer)
+                if draft.version != expected_version:
+                    raise DraftConflict(draft)
                 context = context.model_copy(update={"answer": text})
             use_json = model_id == current["model_id"] and (
                 current["schema_mode"] == "json" or current["error"] == "schema_unsupported"
@@ -575,6 +659,8 @@ class Practice:
             connection.execute(
                 "UPDATE practice_submissions SET current_request_id=? WHERE item_id=?", (new_id, item_id),
             )
+            if text is not None:
+                connection.execute("DELETE FROM practice_clarification_drafts WHERE request_id = ?", (request_id,))
             return self._read_submission(connection, item_id), new_id if model_id else None
 
     @staticmethod
@@ -596,13 +682,19 @@ class Practice:
         ).fetchone()
         if row is None:
             return None
+        assessed_text = json.loads(row["context_json"])["answer"]
+        clarification = (
+            Practice._clarification_draft(connection, row["id"], assessed_text)
+            if row["state"] == "needs_clarification" else None
+        )
         return {
             "text": row["original_text"],
             "completed_at": row["completed_at"],
             "completed_date": row["completed_date"],
             "completed_timezone": row["completed_timezone"],
             "credited": bool(row["credited"]),
-            "assessed_text": json.loads(row["context_json"])["answer"],
+            "assessed_text": assessed_text,
+            "clarification_draft": asdict(clarification) if clarification else None,
             "request": public_request(row),
         }
 
@@ -756,15 +848,30 @@ class Practice:
         return item_id
 
     @staticmethod
-    def _existing_focused_item(candidates: Sequence[_Candidate], existing: dict[str, str]) -> str | None:
-        """Reopen a day's existing item when focused choices have been exhausted."""
-        return next((existing[item.question_id] for item in candidates if item.question_id in existing), None)
+    def _existing_focused_item(
+        connection: sqlite3.Connection, day: _Day, candidates: Sequence[_Candidate], existing: dict[str, str],
+    ) -> str | None:
+        """Resume a saved draft first, then an editable selection in the section."""
+        for item in candidates:
+            draft_id = Practice._unfinished_item_id(connection, item.question_id, existing[item.question_id])
+            if draft_id:
+                return draft_id
+        unsubmitted = {
+            item_id for item_id, in connection.execute(
+                """SELECT selection.item_id
+                   FROM practice_selections AS selection
+                   LEFT JOIN practice_submissions AS submission ON submission.item_id = selection.item_id
+                   WHERE selection.local_date = ? AND submission.item_id IS NULL""",
+                (day.local_date,),
+            )
+        }
+        return next((existing[item.question_id] for item in candidates if existing[item.question_id] in unsubmitted), None)
 
     @staticmethod
     def _exhausted_message(section_id: str | None) -> str:
         """Tell the learner when their requested pool has no additional question."""
         if section_id:
-            return "No questions are available in this section. Choose another section."
+            return "There are no more editable questions in this section. Choose another section."
         return "There are no more distinct questions available for today."
 
     def _today(self, connection: sqlite3.Connection, day: _Day) -> PracticeToday:
@@ -778,9 +885,11 @@ class Practice:
             for kind, *row in connection.execute(
                 """SELECT selection.kind, item.id, item.local_date, item.section_title,
                           item.snapshot_json, item.draft_text, item.draft_version,
-                          EXISTS (SELECT 1 FROM practice_submissions WHERE item_id = item.id)
+                          request.state, request.error
                    FROM practice_selections AS selection
                    JOIN practice_items AS item ON item.id = selection.item_id
+                   LEFT JOIN practice_submissions AS submission ON submission.item_id = item.id
+                   LEFT JOIN grading_requests AS request ON request.id = submission.current_request_id
                    WHERE selection.local_date = ?
                    ORDER BY selection.slot""",
                 (local_date,),
@@ -790,7 +899,7 @@ class Practice:
             self._item(row)
             for row in connection.execute(
                 """SELECT item.id, item.local_date, item.section_title, item.snapshot_json,
-                          item.draft_text, item.draft_version, 0
+                          item.draft_text, item.draft_version, NULL, NULL
                    FROM practice_items AS item
                    WHERE trim(item.draft_text) <> ''
                      AND item.id NOT IN (SELECT item_id FROM practice_submissions)
@@ -813,7 +922,7 @@ class Practice:
             self._item(row)
             for row in connection.execute(
                 """SELECT item.id, item.local_date, item.section_title,
-                          item.snapshot_json, item.draft_text, item.draft_version, 1
+                          item.snapshot_json, item.draft_text, item.draft_version, request.state, request.error
                    FROM practice_submissions AS submission
                    JOIN practice_items AS item ON item.id = submission.item_id
                    JOIN grading_requests AS request ON request.id = submission.current_request_id
@@ -837,11 +946,12 @@ class Practice:
     @staticmethod
     def _item(row: Sequence) -> PracticeItem:
         """Project an immutable stored snapshot onto learner-visible prompt fields."""
-        item_id, local_date, section_title, snapshot_json, text, version, submitted = row
+        item_id, local_date, section_title, snapshot_json, text, version, request_state, request_error = row
         record = json.loads(snapshot_json)
         question = PracticeQuestion(
             record["id"], record["version"], record["section_id"], section_title,
             record["concept_id"], record["title"], record["prompt"], record["objective"],
             record["difficulty"], tuple(record["expected_answer_words"]),
         )
-        return PracticeItem(item_id, local_date, question, Draft(text, version), bool(submitted))
+        grading_status = practice_grading_status(request_state, request_error) if request_state else None
+        return PracticeItem(item_id, local_date, question, Draft(text, version), request_state is not None, grading_status)
