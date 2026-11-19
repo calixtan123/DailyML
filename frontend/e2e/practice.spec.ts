@@ -275,6 +275,7 @@ test('A revealed offline gap is acknowledged after midnight, credited, scheduled
 
 test('History is available before sign-in and resumes the exact saved draft with the keyboard',
   async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
     const beforeMidnight = '2026-03-29T22:58:00+00:00'
     const root = await mkdtemp(join(tmpdir(), 'daily-ml history '))
     const clockFile = join(root, 'clock')
@@ -308,8 +309,10 @@ test('History is available before sign-in and resumes the exact saved draft with
       const title = (await page.locator('#practice-question-title').textContent())!
       await page.getByRole('textbox', { name: 'Your answer' }).fill(draft)
       await page.getByRole('button', { name: 'Save draft' }).click()
-      await expect(page.getByRole('textbox', { name: 'Your answer' })).toHaveValue(draft)
-      const connection = await (await page.request.get(`${origin}/api/connection/status`)).json()
+      await expect(page.getByText('Draft saved.', { exact: true })).toBeVisible()
+      const response = await page.request.get(`${origin}/api/connection`)
+      expect(response.ok()).toBeTruthy()
+      const connection = await response.json()
       expect(connection.state).toBe('signed_out')
 
       const history = page.getByRole('link', { name: 'History', exact: true })
@@ -318,13 +321,15 @@ test('History is available before sign-in and resumes the exact saved draft with
       await page.keyboard.press('Enter')
       await expect(page).toHaveURL(`${origin}/#/history`)
       await expect(page.getByRole('heading', { name: 'History', exact: true })).toBeVisible()
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
       const savedItem = page.getByRole('button', { name: title, exact: true })
       await savedItem.focus()
       await expect(savedItem).toBeFocused()
       await page.keyboard.press('Enter')
       await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible()
       await page.getByText('Saved draft', { exact: true }).click()
-      await expect(page.getByText(draft, { exact: true })).toBeVisible()
+      await expect(page.getByRole('article', { name: title, exact: true })
+        .getByText(draft, { exact: true })).toBeVisible()
 
       const resume = page.getByRole('button', { name: 'Resume practice', exact: true })
       await resume.focus()

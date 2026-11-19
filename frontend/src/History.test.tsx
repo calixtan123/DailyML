@@ -140,7 +140,7 @@ describe('History', () => {
     expect(await screen.findByRole('heading', { name: 'Generalisation' })).toBeTruthy()
     expect(spy).toHaveBeenCalledWith('/api/history/saved-1', expect.anything())
     expect(screen.getByText('How should we test a model?')).toBeTruthy()
-    expect(screen.getByText('Original saved answer')).toBeTruthy()
+    expect(screen.getAllByText('Original saved answer')).not.toHaveLength(0)
     expect(screen.getByText('Good reasoning')).toBeTruthy()
     expect(screen.getByText('Independent answer — no learning support was used before submission.')).toBeTruthy()
     expect(screen.getByText('Question version 2')).toBeTruthy()
