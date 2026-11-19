@@ -4,7 +4,9 @@ import logging
 import secrets
 import sqlite3
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
+from uuid import UUID
 
 from fastapi import BackgroundTasks, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -21,6 +23,7 @@ from .connection import Connection, ConnectionError, ConnectionStatus, SignInSta
 from .database import Database, PreferenceConflict, Preferences
 from .grading import GradingContext
 from .grading_jobs import GradingJobs, RetryConflict
+from .practice import Draft, DraftConflict, DraftInvalid, Practice, PracticeAddition, PracticeItemNotFound, PracticeToday
 from .provider import Provider, ProviderFailure
 
 logger = logging.getLogger(__name__)
@@ -61,6 +64,22 @@ class TestAction(ModelSelection):
 
     idempotency_key: str = Field(min_length=1, max_length=128)
     retry_of: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class PracticeChoice(BaseModel):
+    """Choose varied practice, a focused section or a specific bank question."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    section_id: str | None = Field(default=None, pattern=ID_PATTERN, max_length=64)
+    question_id: str | None = Field(default=None, pattern=ID_PATTERN, max_length=64)
+
+
+class DraftEdit(BaseModel):
+    """Save the editor text against the last observed draft version."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    text: str
+    version: int = Field(ge=0, le=2**63 - 1)
 
 
 def resolve_assets(assets_dir: Path | None = None) -> Path:
@@ -118,6 +137,7 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
     bank = validate_bank()
     database = Database(settings.data_dir)
     import_bank(database, bank)
+    practice = Practice(database, answer_limit=settings.answer_limit)
     host = f"127.0.0.1:{port}"
     origin = f"http://{host}"
     cookie_name = f"daily_ml_session_{port}"
@@ -179,6 +199,8 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         logger.info("Local database operation failed")
         if request.url.path in {"/api/sections", "/api/questions"}:
             return _error(503, "Could not read the question bank. Try again.")
+        if request.url.path.startswith("/api/practice/"):
+            return _error(503, "Could not access saved practice. Try again.")
         return _error(503, "Could not access local settings. Try again.")
 
     @app.exception_handler(PreferenceConflict)
@@ -196,6 +218,8 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         """Do not echo input in request validation responses."""
         if request.url.path == "/api/questions":
             return _error(422, "Choose a valid section.")
+        if request.url.path.startswith("/api/practice/"):
+            return _error(422, "The practice request was invalid.")
         return _error(422, "The settings request was invalid.")
 
     @app.get("/")
@@ -340,6 +364,40 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
             "version": preferences.version,
             "source": "preferences" if timezone else "default",
         }
+
+    def practice_timezone() -> str:
+        """Read the same effective timezone displayed in Settings."""
+        return str(settings_payload(database.get_preferences())["timezone"])
+
+    @app.exception_handler(PracticeItemNotFound)
+    async def missing_practice_item(_request: Request, _error_detail: PracticeItemNotFound):
+        """Avoid echoing the missing practice identity or question ID."""
+        return _error(404, "This question is unavailable. Choose another question.")
+
+    @app.exception_handler(DraftInvalid)
+    async def invalid_draft(_request: Request, error: DraftInvalid):
+        """Return a safe validation message without answer text."""
+        return _error(422, str(error))
+
+    @app.exception_handler(DraftConflict)
+    async def draft_conflict(_request: Request, error: DraftConflict):
+        """Return the actual saved draft for the local editor's conflict view."""
+        return JSONResponse({"detail": str(error), "saved": asdict(error.saved)}, status_code=409)
+
+    @app.post("/api/practice/today")
+    def open_today() -> PracticeToday:
+        """Prepare and return the current date's saved local practice session."""
+        return practice.today(practice_timezone())
+
+    @app.post("/api/practice/items")
+    def add_practice(choice: PracticeChoice) -> PracticeAddition:
+        """Save or resume a requested extra question in the local session."""
+        return practice.add_item(practice_timezone(), section_id=choice.section_id, question_id=choice.question_id)
+
+    @app.put("/api/practice/items/{item_id}/draft")
+    def save_draft(item_id: UUID, edit: DraftEdit) -> Draft:
+        """Persist a versioned draft and return the committed text and version."""
+        return practice.save_draft(str(item_id), edit.text, expected_version=edit.version, timezone=practice_timezone())
 
     @app.get("/api/settings")
     def read_settings() -> dict[str, str | int]:

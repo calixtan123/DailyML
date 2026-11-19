@@ -1,12 +1,19 @@
 export type LocalRequest = <T>(path: string, options?: RequestInit) => Promise<T>
 
+/** Preserve structured local errors so the draft editor can show a conflicting save. */
+export class LocalApiError extends Error {
+  constructor(readonly status: number, readonly payload: { detail?: unknown; saved?: unknown } | null) {
+    super(typeof payload?.detail === 'string'
+      ? payload.detail
+      : 'Daily ML Practice could not complete the request.')
+  }
+}
+
 async function responseData<T>(response: Response): Promise<T> {
   if (response.ok) return response.json() as Promise<T>
 
-  const payload: { detail?: unknown } | null = await response.json().catch(() => null)
-  throw new Error(
-    typeof payload?.detail === 'string' ? payload.detail : 'Daily ML Practice could not complete the request.',
-  )
+  const payload = await response.json().catch(() => null)
+  throw new LocalApiError(response.status, payload)
 }
 
 let session: Promise<string> | undefined

@@ -4,7 +4,7 @@ import type { Dispatch, SetStateAction } from 'react'
 import { request } from './api'
 import { ConnectionSettings, type GradingAccount } from './ConnectionSettings'
 import { GradingSettings, type GradingAction } from './GradingSettings'
-import { QuestionBrowser } from './QuestionBrowser'
+import { Today, type LeaveToday } from './Today'
 import { TimezoneSettings } from './TimezoneSettings'
 
 type RetainedGradingAction = { account: string; action: GradingAction }
@@ -54,11 +54,17 @@ function SettingsPage({ retainedAction, setRetainedAction }: {
 /** Render Today and Settings, retaining unacknowledged grading submissions across navigation. */
 export function App() {
   const [page, setPage] = useState(activePage)
+  const [openedToday, setOpenedToday] = useState(() => activePage() === 'Today')
   const [retainedAction, setRetainedAction] = useState<RetainedGradingAction>()
   const content = useRef<HTMLElement>(null)
+  const leaveToday = useRef<LeaveToday | null>(null)
 
   useEffect(() => {
-    const onHashChange = () => setPage(activePage())
+    const onHashChange = () => {
+      const next = activePage()
+      if (next === 'Today') setOpenedToday(true)
+      setPage(next)
+    }
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [])
@@ -83,7 +89,13 @@ export function App() {
             <a className="nav-link" href="#/today" aria-current={page === 'Today' ? 'page' : undefined}>
               <BookOpen size={17} aria-hidden="true" /> Today
             </a>
-            <a className="nav-link" href="#/settings" aria-current={page === 'Settings' ? 'page' : undefined}>
+            <a className="nav-link" href="#/settings" aria-current={page === 'Settings' ? 'page' : undefined}
+              onClick={(event) => {
+                if (page !== 'Today' || !leaveToday.current ||
+                    event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return
+                event.preventDefault()
+                leaveToday.current(() => { window.location.hash = '#/settings' })
+              }}>
               <Settings size={17} aria-hidden="true" /> Settings
             </a>
           </nav>
@@ -91,12 +103,12 @@ export function App() {
         <div className="workspace">
           <header className="topbar"><span>Daily ML Practice</span><span aria-hidden="true">/</span> {page}</header>
           <main id="main-content" tabIndex={-1} ref={content}>
-            {page === 'Today' ? (
-              <>
-                <h1>Browse questions</h1>
-                <QuestionBrowser request={request} />
-              </>
-            ) : (
+            {openedToday && (
+              <div hidden={page !== 'Today'}>
+                <Today request={request} active={page === 'Today'} leaveToday={leaveToday} />
+              </div>
+            )}
+            {page === 'Settings' && (
               <SettingsPage retainedAction={retainedAction} setRetainedAction={setRetainedAction} />
             )}
           </main>

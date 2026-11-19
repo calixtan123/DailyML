@@ -64,7 +64,13 @@ const difficultyLabels: Record<Question['difficulty'], string> = {
   advanced: 'Advanced',
 }
 
-function SectionQuestions({ section, request }: { section: Section; request: LocalRequest }) {
+type PracticeChoice = { section_id: string; question_id?: string }
+type PracticeActions = { onPractice?: (choice: PracticeChoice) => void; practiceDisabled?: boolean }
+
+function SectionQuestions({ section, request, onPractice, practiceDisabled }: {
+  section: Section
+  request: LocalRequest
+} & PracticeActions) {
   const path = '/api/questions?' + new URLSearchParams({ section_id: section.id })
   const { result, retry } = useBankResource<Question[]>(request, path)
   const [selectedQuestion, setSelectedQuestion] = useState('')
@@ -94,13 +100,21 @@ function SectionQuestions({ section, request }: { section: Section; request: Loc
         <div className="browser-objective">
           <h3>Learning objective</h3>
           <p>{current.objective}</p>
+          {onPractice && (
+            <button type="button" disabled={practiceDisabled}
+              onClick={() => onPractice({ section_id: section.id, question_id: current.id })}>
+              Practise this question
+            </button>
+          )}
         </div>
       </article>
     </div>
   )
 }
 
-export function QuestionBrowser({ request }: { request: LocalRequest }) {
+export function QuestionBrowser({ request, onPractice, practiceDisabled }: {
+  request: LocalRequest
+} & PracticeActions) {
   const { result, retry } = useBankResource<Section[]>(request, '/api/sections')
   const [selectedSection, setSelectedSection] = useState('')
 
@@ -119,8 +133,14 @@ export function QuestionBrowser({ request }: { request: LocalRequest }) {
             <option key={section.id} value={section.id}>{section.title} ({section.question_count})</option>
           ))}
         </select>
+        {onPractice && (
+          <button type="button" disabled={practiceDisabled} onClick={() => onPractice({ section_id: current.id })}>
+            Practise this section
+          </button>
+        )}
       </div>
-      <SectionQuestions key={current.id} section={current} request={request} />
+      <SectionQuestions key={current.id} section={current} request={request}
+        onPractice={onPractice} practiceDisabled={practiceDisabled} />
     </div>
   )
 }

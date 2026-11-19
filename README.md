@@ -1,8 +1,10 @@
 # Daily ML Practice
 
-Daily ML Practice runs on your Mac and opens the question browser. Choose a section and question to read its prompt and learning objective. The 12 starter questions work offline without a ChatGPT sign-in.
+Daily ML Practice runs on your Mac and opens **Today** with two saved recommendations. Use **More questions** for extra practice or **Browse questions** to choose a topic or specific question. The 12 starter questions work offline without a ChatGPT sign-in.
 
 Open **Settings** to connect your ChatGPT account, save local preferences and test grading with a fixed question about data leakage.
+
+Use **Save draft** to keep your work in SQLite. Switching questions also saves any edits. If a save fails, the editor keeps your text and offers retry and copy controls. If another tab saves first, Today shows both versions and asks which to keep. Drafts stay available under **Resume practice** across days and keep their original question even if the bank is updated.
 
 ## Install and run
 
@@ -32,7 +34,7 @@ Settings shows the model's feedback and a local grade from 0 to 3, or its reques
 
 ## Settings and local data
 
-The default directory is `~/Library/Application Support/Daily ML Practice/`. It contains the SQLite database for preferences and imported question versions, rotating operational logs, and a protected `credentials/` directory. Keep credentials out of SQLite backups. Signing out retains SQLite data and the saved account registration and installation identity.
+The default directory is `~/Library/Application Support/Daily ML Practice/`. It contains the SQLite database for preferences, imported question versions, saved recommendations, question snapshots and drafts, plus rotating operational logs and a protected `credentials/` directory. A consistent SQLite backup includes the saved practice records. Keep credentials out of SQLite backups. Signing out retains SQLite data and the saved account registration and installation identity.
 
 Configuration loads packaged defaults, saved SQLite preferences, installation TOML, then `DML_` environment overrides. The launcher resolves the data directory before it opens SQLite. Settings shows whether the timezone is controlled by an override.
 

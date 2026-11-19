@@ -11,13 +11,19 @@ function stubLocalApi(account: Account = null, submitTest?: (options: RequestIni
     switch (path) {
       case '/api/session':
         return Response.json({ csrf_token: 'local-test-session' })
-      case '/api/sections':
-        return Response.json([{ id: 'fundamentals', title: 'Fundamentals', question_count: 1 }])
-      case '/api/questions?section_id=fundamentals':
-        return Response.json([{
-          id: 'generalisation', version: 1, title: 'Generalisation', difficulty: 'introductory',
-          prompt: 'How should we evaluate new rentals?', objective: 'Explain generalisation.',
-        }])
+      case '/api/practice/today':
+        return Response.json({
+          local_date: '2026-11-19', timezone: 'Europe/London', effective_timezone: 'Europe/London',
+          goal: 2, answer_limit: 8000, shortage: null, unfinished: [],
+          selections: [{ kind: 'variety', item: {
+            id: 'first', local_date: '2026-11-19', draft: { text: '', version: 0 },
+            question: {
+              title: 'Generalisation', difficulty: 'introductory', section_title: 'Fundamentals',
+              prompt: 'How should we evaluate new rentals?', objective: 'Explain generalisation.',
+              expected_answer_words: [30, 80],
+            },
+          } }],
+        })
       case '/api/connection/sign-out':
         if (options?.method !== 'POST') throw new Error('Sign-out requires POST.')
         account = null
@@ -72,7 +78,7 @@ afterEach(() => {
 })
 
 describe('Daily ML Practice', () => {
-  it('opens Today for signed-out browsing and keeps grading in Settings', async () => {
+  it('opens Today for signed-out practice and keeps connection grading in Settings', async () => {
     stubLocalApi()
     render(<App />)
 
