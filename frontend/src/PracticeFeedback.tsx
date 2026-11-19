@@ -54,6 +54,16 @@ type SubmissionVersion = {
   request: GradingRequest
 }
 
+type Dispute = {
+  id: string
+  status: 'open' | 'resolved'
+  target_request_id: string
+  role: 'original' | 'revision'
+  objection: string
+  selected_request_id: string | null
+  assessments: GradingRequest[]
+}
+
 export type SavedSubmission = AnswerTrack & {
   text: string
   completed_date: string
@@ -62,6 +72,7 @@ export type SavedSubmission = AnswerTrack & {
   versions: SubmissionVersion[]
   revision: AnswerTrack | null
   revision_draft: Draft | null
+  disputes?: Dispute[]
 }
 
 type FollowUp = {
@@ -122,10 +133,14 @@ function isActive(job: GradingRequest | undefined) {
   return job?.state === 'in_flight' || (job?.state === 'queued' && !job.can_send)
 }
 
-function Assessment({ job, feedback }: { job: GradingRequest; feedback: Extract<Feedback, { status: 'assessed' }> }) {
+function Assessment({ job, feedback, title = 'AI-generated feedback' }: {
+  job: GradingRequest
+  feedback: Extract<Feedback, { status: 'assessed' }>
+  title?: string
+}) {
   return (
-    <section className="grading-result" aria-label="AI-generated feedback">
-      <h4>AI-generated feedback</h4>
+    <section className="grading-result" aria-label={title}>
+      <h4>{title}</h4>
       <p role="status"><strong>Grade {job.grade} of 3</strong></p>
       <h5>What you understood</h5>
       <p>{feedback.summary}</p>
@@ -190,8 +205,96 @@ function AnswerText({ label, text, open }: { label: string; text: string; open?:
   )
 }
 
+type DisputeAction = (route: string, body?: Record<string, string>) => Promise<boolean>
+
+function AssessmentDispute({ job, dispute, disabled, act }: {
+  job: GradingRequest
+  dispute?: Dispute
+  disabled: boolean
+  act: DisputeAction
+}) {
+  const [editing, setEditing] = useState(false)
+  const [objection, setObjection] = useState('')
+  const openButton = useRef<HTMLButtonElement>(null)
+  if (!dispute) {
+    if (job.state !== 'assessed') return null
+    return (
+      <div className="practice-attempt">
+        <button ref={openButton} type="button" disabled={disabled} aria-expanded={editing}
+          onClick={() => setEditing(true)}>Dispute assessment</button>
+        {editing && (
+          <form className="practice-attempt" onSubmit={async event => {
+            event.preventDefault()
+            if (await act('disputes', { request_id: job.id, objection: objection.trim() })) {
+              setEditing(false)
+              setObjection('')
+            }
+          }}>
+            <label>
+              Your objection
+              <textarea autoFocus required maxLength={1600} value={objection} disabled={disabled}
+                onChange={event => setObjection(event.target.value)} />
+            </label>
+            <div className="actions">
+              <button type="submit" disabled={disabled || !objection.trim()}>Open dispute</button>
+              <button type="button" disabled={disabled} onClick={() => {
+                setEditing(false)
+                openButton.current?.focus()
+              }}>Cancel</button>
+            </div>
+          </form>
+        )}
+      </div>
+    )
+  }
+
+  const originalId = dispute.target_request_id
+  const reassessments = dispute.assessments.filter(candidate => candidate.id !== originalId)
+  const latest = reassessments.find(candidate => candidate.state !== 'assessed')
+  const available = reassessments.filter(candidate => candidate.state === 'assessed')
+  const base = `disputes/${dispute.id}`
+  const isOpen = dispute.status === 'open'
+  const canReassess = isOpen && !available.length && !reassessments.some(isActive)
+  function accept(assessmentId: string) {
+    void act(`${base}/resolve`, { assessment_request_id: assessmentId })
+  }
+
+  return (
+    <section className="practice-attempt" aria-label="Assessment dispute">
+      <h4>Assessment dispute</h4>
+      <p role="status">{isOpen ? 'Dispute open.' : dispute.selected_request_id === originalId
+        ? 'Original assessment accepted.' : 'Reassessment accepted.'}</p>
+      <p className="practice-original"><strong>Your objection</strong> {dispute.objection}</p>
+      {isOpen && <div className="actions">
+        <button type="button" disabled={disabled} onClick={() => accept(originalId)}>Accept original assessment</button>
+      </div>}
+      {available.map(candidate => candidate.feedback?.status === 'assessed' && (
+        <div className="practice-attempt" key={candidate.id}>
+          <Assessment job={candidate} feedback={candidate.feedback} title="AI-generated reassessment" />
+          {isOpen && <div className="actions">
+            <button type="button" disabled={disabled} onClick={() => accept(candidate.id)}>Accept reassessment</button>
+          </div>}
+        </div>
+      ))}
+      {latest && !available.length && (
+        <div>
+          <p role="status">{REQUEST_LABELS[latest.state]}</p>
+          {latest.message && <p>{latest.message}</p>}
+          {latest.feedback?.status === 'needs_clarification' && <p>{latest.feedback.explanation}</p>}
+          {latest.state === 'awaiting_access' && <a href="#/settings">Open grading settings</a>}
+        </div>
+      )}
+      {canReassess && <div className="actions">
+        <button type="button" disabled={disabled} onClick={() => void act(`${base}/reassess`)}>
+          {latest ? 'Retry reassessment' : 'Request reassessment'}
+        </button>
+      </div>}
+    </section>
+  )
+}
+
 /** Read saved feedback and poll while the latest answer's grading request is active. */
-export function PracticeFeedback({ itemId, request, active, initial, answerLimit, navigationPending, leaveEditor, onStatus }: {
+export function PracticeFeedback({ itemId, request, active, initial, answerLimit, navigationPending, leaveEditor, onStatus, onReviewsChanged }: {
   itemId: string
   request: LocalRequest
   active: boolean
@@ -200,6 +303,7 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
   navigationPending: boolean
   leaveEditor: RefObject<LeaveEditor | null>
   onStatus: (itemId: string, status: GradingStatus) => void
+  onReviewsChanged?: () => void
 }) {
   const [view, setView] = useState<FeedbackView>({ submission: initial })
   const [reload, setReload] = useState(0)
@@ -243,7 +347,9 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
         const job = saved.revision?.request ?? saved.request
         onStatus(itemId, job.can_send ? 'ready_to_send' : job.state)
         setReadError(false)
-        if (isActive(job)) timer = setTimeout(refresh, POLL_MS)
+        if (isActive(job) || saved.disputes?.some(dispute => dispute.assessments.some(isActive))) {
+          timer = setTimeout(refresh, POLL_MS)
+        }
       } catch {
         if (!controller.signal.aborted && version === actionVersion.current) setReadError(true)
       }
@@ -315,6 +421,39 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
     return saved
   }
 
+  async function updateDispute(route: string, payload?: Record<string, string>) {
+    if (action.current) return false
+    const controller = new AbortController()
+    action.current = controller
+    actionVersion.current += 1
+    setBusy(true)
+    setActionError('')
+    try {
+      const saved = await request<SavedSubmission>(`${base}/${route}`, {
+        method: 'POST', signal: controller.signal,
+        headers: payload ? { 'Content-Type': 'application/json' } : undefined,
+        body: payload ? JSON.stringify(payload) : undefined,
+      })
+      if (controller.signal.aborted) return false
+      lastRead.current = saved
+      setView(previous => mergeRead(previous, saved))
+      if (route === 'disputes' || route.endsWith('/resolve')) onReviewsChanged?.()
+      setReload(value => value + 1)
+      return true
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setActionError(error instanceof LocalApiError
+          ? error.message : 'Could not confirm the dispute action. Refresh the status before trying again.')
+      }
+      return false
+    } finally {
+      if (!controller.signal.aborted) {
+        action.current = undefined
+        setBusy(false)
+      }
+    }
+  }
+
   const followUpEditor = editor && (
     <FollowUpEditor key={`${editor.kind}-${editor.requestId}`} kind={editor.kind} draft={editor.draft}
       edit={edit} closedByRefresh={replacement !== undefined}
@@ -355,6 +494,8 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
             <RequestFeedback job={original} disabled={disabled} retry={() => void send(original.id, 'retry')}>
               {editor?.track === 'original' && followUpEditor}
             </RequestFeedback>
+            <AssessmentDispute key={original.id} job={original} disabled={disabled} act={updateDispute}
+              dispute={submission.disputes?.find(dispute => dispute.target_request_id === original.id)} />
           </section>
           {revision && (
             <section className="practice-attempt" aria-labelledby="assisted-revision">
@@ -367,6 +508,8 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
               <RequestFeedback job={revision.request} disabled={disabled} retry={() => void send(revision.request.id, 'retry')}>
                 {editor?.track === 'revision' && followUpEditor}
               </RequestFeedback>
+              <AssessmentDispute key={revision.request.id} job={revision.request} disabled={disabled} act={updateDispute}
+                dispute={submission.disputes?.find(dispute => dispute.target_request_id === revision.request.id)} />
             </section>
           )}
           {!revision && submission.revision_draft && (

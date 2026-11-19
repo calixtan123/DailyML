@@ -41,6 +41,7 @@ class GradingContext(BaseModel):
     criteria: list[Criterion] = Field(min_length=1, max_length=8)
     critical_misconceptions: dict[str, str]
     sources: dict[str, str]
+    objection: str | None = Field(default=None, min_length=1, max_length=1600)
 
     @classmethod
     def connection_test(cls) -> "GradingContext":

@@ -124,6 +124,142 @@ def _retry(client, headers, item_id, request_id, text=None):
                        json={"request_id": request_id, "text": text, "idempotency_key": "retry"})
 
 
+def test_opening_original_dispute_excludes_its_review_evidence_and_retains_target(learner):
+    """Open a dispute without changing completion credit or retaining objection in public request data."""
+    client, headers, db, _ = learner
+    _configure_model(db)
+    client.app.state.grading.provider = provider(lambda outbound: response_stream(_valid_terminal(outbound)))
+    item = _today(client, headers)["selections"][0]["item"]
+    submission = _submit(client, headers, item["id"], "An answer to challenge.").json()["submission"]
+
+    response = client.post(
+        f"/api/practice/items/{item['id']}/disputes", headers=headers,
+        json={"request_id": submission["request"]["id"], "objection": "The rubric was applied incorrectly."},
+    )
+
+    assert response.status_code == 200
+    saved = response.json()
+    assert saved["credited"] is True
+    assert saved["disputes"][0]["status"] == "open"
+    assert saved["disputes"][0]["target_request_id"] == submission["request"]["id"]
+    assert saved["disputes"][0]["objection"] == "The rubric was applied incorrectly."
+    assert "objection" not in saved["request"]
+    with db.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM review_evidence_selection").fetchone() == (0,)
+
+
+def test_resolving_original_dispute_with_reassessment_selects_only_its_saved_version(learner):
+    """Reassessment stays on its exact version and restores selected review evidence without new credit."""
+    client, headers, db, _ = learner
+    _configure_model(db)
+    client.app.state.grading.provider = provider(lambda outbound: response_stream(_valid_terminal(outbound)))
+    item = _today(client, headers)["selections"][0]["item"]
+    original = _submit(client, headers, item["id"], "The exact answer.").json()["submission"]
+    opened = client.post(f"/api/practice/items/{item['id']}/disputes", headers=headers, json={
+        "request_id": original["request"]["id"], "objection": "Please assess this reasoning again.",
+    }).json()
+
+    reassessed = client.post(
+        f"/api/practice/items/{item['id']}/disputes/{opened['disputes'][0]['id']}/reassess", headers=headers,
+    )
+
+    assert reassessed.status_code == 202
+    dispute = client.get(f"/api/practice/items/{item['id']}/submission").json()["disputes"][0]
+    reassessment = next(entry for entry in dispute["assessments"] if entry["id"] != original["request"]["id"])
+    assert reassessment["state"] == "assessed"
+    resolved = client.post(
+        f"/api/practice/items/{item['id']}/disputes/{dispute['id']}/resolve", headers=headers,
+        json={"assessment_request_id": reassessment["id"]},
+    )
+
+    assert resolved.status_code == 200
+    assert resolved.json()["disputes"][0]["selected_request_id"] == reassessment["id"]
+    assert resolved.json()["credited"] is True
+    with db.connect() as connection:
+        assert connection.execute("""
+            SELECT evidence.grading_request_id FROM review_evidence_selection AS selection
+            JOIN review_evidence AS evidence ON evidence.original_item_id = selection.original_item_id
+              AND evidence.id = selection.evidence_id
+        """).fetchone() == (reassessment["id"],)
+        assert connection.execute("SELECT submitted_text FROM practice_evaluated_requests WHERE id = ?", (reassessment["id"],)).fetchone() == ("The exact answer.",)
+
+
+def test_assisted_revision_dispute_keeps_original_review_selection_and_survives_backup(learner, tmp_path):
+    """An assisted dispute is retained independently and never removes original scheduling evidence."""
+    client, headers, db, _ = learner
+    _configure_model(db)
+    client.app.state.grading.provider = provider(lambda outbound: response_stream(_valid_terminal(outbound)))
+    item = _today(client, headers)["selections"][0]["item"]
+    original = _submit(client, headers, item["id"], "The original answer.").json()["submission"]
+    revision = client.post(f"/api/practice/items/{item['id']}/revise", headers=headers, json={
+        "request_id": original["request"]["id"], "text": "The assisted revision.", "version": 0,
+    })
+    assert revision.status_code == 202
+    revised = revision.json()["revision"]
+
+    opened = client.post(f"/api/practice/items/{item['id']}/disputes", headers=headers, json={
+        "request_id": revised["request"]["id"], "objection": "The revision should receive different feedback.",
+    })
+
+    assert opened.status_code == 200
+    assert opened.json()["disputes"][0]["role"] == "revision"
+    with db.connect() as connection:
+        assert connection.execute("SELECT evidence_id FROM review_evidence_selection").fetchone() == (original["request"]["id"],)
+    restored = Database(tmp_path / "restored-dispute")
+    with db.connect() as source, restored.connect() as destination:
+        source.backup(destination)
+    restored_practice = Practice(restored, answer_limit=8000)
+    assert restored_practice.submission(item["id"])["disputes"][0]["target_request_id"] == revised["request"]["id"]
+
+
+def test_dispute_rejects_an_assessment_from_another_saved_answer(learner):
+    """Resolution cannot select feedback that is not a member of its immutable dispute."""
+    client, headers, db, _ = learner
+    _configure_model(db)
+    client.app.state.grading.provider = provider(lambda outbound: response_stream(_valid_terminal(outbound)))
+    first, second = [entry["item"] for entry in _today(client, headers)["selections"]]
+    original = _submit(client, headers, first["id"], "First assessed answer.").json()["submission"]
+    unrelated = _submit(client, headers, second["id"], "Second assessed answer.").json()["submission"]
+    dispute = client.post(f"/api/practice/items/{first['id']}/disputes", headers=headers, json={
+        "request_id": original["request"]["id"], "objection": "Please reconsider.",
+    }).json()["disputes"][0]
+
+    response = client.post(f"/api/practice/items/{first['id']}/disputes/{dispute['id']}/resolve", headers=headers,
+                           json={"assessment_request_id": unrelated["request"]["id"]})
+
+    assert response.status_code == 409
+    assert client.get(f"/api/practice/items/{first['id']}/submission").json()["disputes"][0]["status"] == "open"
+
+
+def test_late_reassessment_is_retained_without_overriding_original_resolution(learner):
+    """A reassessment finishing after a chosen original remains history, not a new decision."""
+    client, headers, db, _ = learner
+    _configure_model(db)
+    jobs = client.app.state.grading
+    jobs.provider = provider(lambda outbound: response_stream(_valid_terminal(outbound)))
+    item = _today(client, headers)["selections"][0]["item"]
+    original = _submit(client, headers, item["id"], "An answer with a late reassessment.").json()["submission"]
+    dispute = client.post(f"/api/practice/items/{item['id']}/disputes", headers=headers, json={
+        "request_id": original["request"]["id"], "objection": "Reassess after I choose the original.",
+    }).json()["disputes"][0]
+
+    async def park(_request_id):
+        """Leave the durable reassessment queued until the test explicitly completes it."""
+    jobs.run_pending = park
+    queued = client.post(f"/api/practice/items/{item['id']}/disputes/{dispute['id']}/reassess", headers=headers)
+    assert queued.status_code == 202
+    reassessment_id = next(entry["id"] for entry in queued.json()["disputes"][0]["assessments"]
+                           if entry["id"] != original["request"]["id"])
+    assert client.post(f"/api/practice/items/{item['id']}/disputes/{dispute['id']}/resolve", headers=headers,
+                       json={"assessment_request_id": original["request"]["id"]}).status_code == 200
+
+    import asyncio
+    asyncio.run(type(client.app.state.grading).run_pending(jobs, reassessment_id))
+    saved = client.get(f"/api/practice/items/{item['id']}/submission").json()["disputes"][0]
+    assert saved["selected_request_id"] == original["request"]["id"]
+    assert any(entry["id"] == reassessment_id and entry["state"] == "assessed" for entry in saved["assessments"])
+
+
 def _valid_terminal(http_request):
     """Construct feedback for the exact question rubric that traversed the SDK."""
     import json
