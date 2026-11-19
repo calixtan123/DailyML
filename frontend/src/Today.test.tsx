@@ -70,6 +70,7 @@ function practiceWithPendingReview(
       const submission: SavedSubmission = {
         text: 'An answer from yesterday.', assessed_text: 'An answer from yesterday.', credited: true,
         completed_date: '2026-11-18', completed_timezone: 'Europe/London', clarification_draft: null,
+        submission_version_id: 'yesterday-version', supported: false, versions: [], revision: null, revision_draft: null,
         request: {
           id: 'grading', state: assessed ? 'assessed' : 'in_flight', can_send: false,
           grade: assessed ? 3 : null, message: null, reference: { sources: {} },
@@ -589,7 +590,7 @@ describe('Clarification draft', () => {
     fireEvent.click(screen.getByRole('link', { name: 'Settings' }))
     const alert = await screen.findByRole('alert')
     expect(alert.textContent).toContain('Could not save your clarification draft.')
-    expect(document.activeElement).toBe(alert)
+    await waitFor(() => expect(document.activeElement).toBe(alert))
     expect(editor).toHaveProperty('value', text)
     expect(screen.queryByRole('heading', { name: 'Settings' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Copy my answer' })).toBeTruthy()
@@ -724,5 +725,228 @@ describe('Practice session grading summaries', () => {
     expect(within(select).getByRole('option', { name: /Generalisation.*Needs clarification/ })).toBeTruthy()
     expect(within(select).getByRole('option', { name: /Model monitoring.*Needs retry/ })).toBeTruthy()
     expect(fetch.mock.calls.some(([path]) => path === '/api/practice/items/previous/submission')).toBe(false)
+  })
+})
+
+const assessedOriginal: SavedSubmission['request'] = {
+  id: 'original-assessment', state: 'assessed', grade: 2, can_send: false, message: null,
+  reference: { sources: {} },
+  feedback: {
+    status: 'assessed', summary: 'Explain when the test set is used.', corrections: [],
+    model_answer: 'Evaluate on new data after model selection.', reasoning: [], example: '', source_ids: [],
+  },
+}
+
+function revisionApi(outcome: 'outcome_unknown' | 'conflict' | 'needs_clarification' = 'outcome_unknown') {
+  const original = 'Evaluate the model on data it has never seen.'
+  const originalDraft = { text: original, version: 0 }
+  let draft: TestDraft | null = originalDraft
+  let firstRevisedText: string | undefined
+  let revision: {
+    assessed_text: string
+    clarification_draft: TestDraft | null
+    request: SavedSubmission['request']
+    submission_version_id: string
+    supported: boolean
+  } | null = null
+  function result() {
+    return Response.json({
+      text: original, assessed_text: original, credited: true,
+      completed_date: '2026-11-11', completed_timezone: 'Europe/London',
+      request: assessedOriginal, clarification_draft: null, submission_version_id: 'original',
+      supported: false, versions: firstRevisedText ? [{
+        id: 'first-revision', kind: 'revision', role: 'revision', text: firstRevisedText, supported: true,
+        parent_version_id: 'original', created_at: 1, request: revision?.request,
+      }] : [], revision, revision_draft: draft,
+    })
+  }
+  const { today, fetch } = practiceApi(undefined, undefined, (path, options) => {
+    if (path.endsWith('/previous/submission')) return result()
+    const edit = JSON.parse(String(options?.body))
+    if (path.endsWith('/revision-draft')) {
+      expect(edit.request_id).toBe('original-assessment')
+      expect(edit.version).toBe(draft?.version)
+      draft = { text: edit.text, version: edit.version + 1 }
+      return Response.json(draft)
+    }
+    if (path.endsWith('/revise')) {
+      expect(edit.request_id).toBe('original-assessment')
+      expect({ text: edit.text, version: edit.version }).toEqual(draft)
+      revision = {
+        assessed_text: outcome === 'conflict' ? 'The answer submitted in the other tab.' : edit.text,
+        clarification_draft: outcome === 'needs_clarification' ? { text: edit.text, version: 0 } : null,
+        submission_version_id: 'first-revision', supported: true,
+        request: outcome === 'needs_clarification'
+          ? { ...clarificationRequest, id: 'revision-assessment' }
+          : { ...assessedOriginal, id: 'revision-assessment', state: 'outcome_unknown', grade: null, feedback: null },
+      }
+      firstRevisedText = revision.assessed_text
+      draft = null
+      return outcome === 'conflict'
+        ? Response.json({ detail: 'The revision was already submitted.' }, { status: 409 })
+        : result()
+    }
+    if (path.endsWith('/clarification-draft') && revision) {
+      expect(edit.request_id).toBe('revision-assessment')
+      expect(edit.version).toBe(revision.clarification_draft?.version)
+      revision.clarification_draft = { text: edit.text, version: edit.version + 1 }
+      return Response.json(revision.clarification_draft)
+    }
+    if (path.endsWith('/retry') && revision && assessedOriginal.feedback?.status === 'assessed') {
+      expect(edit.request_id).toBe('revision-assessment')
+      if (outcome === 'needs_clarification') {
+        expect({ text: edit.text, version: edit.version }).toEqual(revision.clarification_draft)
+        revision.assessed_text = edit.text
+        revision.clarification_draft = null
+        revision.submission_version_id = 'clarified-revision'
+      }
+      revision.request = {
+        ...revision.request,
+        id: 'completed-revision-assessment', state: 'assessed', grade: 3,
+        feedback: { ...assessedOriginal.feedback, summary: 'The use of a final test set is clear.' },
+      }
+      return result()
+    }
+    throw new Error(`Unexpected request ${path}`)
+  })
+  today.submitted.push({
+    ...item('previous', 'Generalisation', '', 0, '2026-11-11'),
+    submitted: true, grading_status: 'assessed',
+  })
+  today.first_use_date = '2026-11-11'
+  today.completion_counts = { '2026-11-11': 1 }
+  return { original, fetch }
+}
+
+describe('Assisted revision', () => {
+  it('reopens an older submission, saves the revision on navigation, and compares both feedback results after retry', async () => {
+    const { original, fetch } = revisionApi()
+    const { unmount } = render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: /Generalisation.*Assessed/ }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Revise answer' }))
+    const editor = screen.getByRole('textbox', { name: 'Revised answer' })
+    expect(editor).toHaveProperty('value', original)
+    const revisedText = 'After choosing the model, use a separate final test set.'
+    fireEvent.change(editor, { target: { value: revisedText } })
+
+    fireEvent.click(screen.getByRole('button', { name: /Data leakage/ }))
+    await screen.findByRole('heading', { name: 'Data leakage' })
+    fireEvent.click(screen.getByRole('button', { name: /Generalisation.*Assessed/ }))
+    const reopen = await screen.findByRole('button', { name: 'Revise answer' })
+    fireEvent.click(reopen)
+    expect(screen.getByRole('textbox', { name: 'Revised answer' })).toHaveProperty('value', revisedText)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Send revised answer' }))
+    const originalAttempt = await screen.findByRole('region', { name: 'Original attempt' })
+    const assistedRevision = await screen.findByRole('region', { name: 'Assisted revision' })
+    await waitFor(() => expect(document.activeElement).toBe(within(assistedRevision).getByRole('heading', {
+      name: 'Assisted revision',
+    })))
+    expect(within(originalAttempt).getByText(original)).toBeTruthy()
+    expect(within(originalAttempt).getByText('Grade 2 of 3')).toBeTruthy()
+    expect(within(assistedRevision).getByText(revisedText)).toBeTruthy()
+    expect(within(assistedRevision).getByText('Grading outcome unknown')).toBeTruthy()
+    fireEvent.click(within(assistedRevision).getByRole('button', { name: 'Retry grading' }))
+    expect(await within(assistedRevision).findByText('Grade 3 of 3')).toBeTruthy()
+    expect(within(originalAttempt).getByText('Explain when the test set is used.')).toBeTruthy()
+    expect(within(assistedRevision).getByText('The use of a final test set is clear.')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Revise answer' })).toBeNull()
+    expect(screen.getByText('No practice yet today')).toBeTruthy()
+    expect(fetch.mock.calls.filter(([path]) => path.endsWith('/revise'))).toHaveLength(1)
+
+    unmount()
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: /Generalisation.*Assessed/ }))
+    const savedRevision = await screen.findByRole('region', { name: 'Assisted revision' })
+    expect(within(savedRevision).getByText(revisedText)).toBeTruthy()
+    expect(within(savedRevision).getByText('Grade 3 of 3')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Revise answer' })).toBeNull()
+  })
+
+  it('keeps the local revision copyable when another tab takes the only revision', async () => {
+    revisionApi('conflict')
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: /Generalisation.*Assessed/ }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Revise answer' }))
+    const editor = screen.getByRole('textbox', { name: 'Revised answer' })
+    const text = 'My version explains the split more directly.'
+    fireEvent.change(editor, { target: { value: text } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send revised answer' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('This revision is closed.')
+    expect(editor).toHaveProperty('value', text)
+    expect(editor).toHaveProperty('readOnly', true)
+    await waitFor(() => expect(document.activeElement).toBe(alert))
+    fireEvent.click(screen.getByRole('button', { name: 'Copy my answer' }))
+    await screen.findByText(/Your answer is selected/)
+    expect(editor).toHaveProperty('selectionEnd', text.length)
+    fireEvent.click(screen.getByRole('button', { name: 'Discard edit and refresh grading status' }))
+    expect(await screen.findByText('The answer submitted in the other tab.')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Revise answer' })).toBeNull()
+  })
+
+  it('clarifies the revised answer inside the assisted revision and retains its first submitted text', async () => {
+    const { fetch } = revisionApi('needs_clarification')
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: /Generalisation.*Assessed/ }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Revise answer' }))
+    const revised = 'Use a final test set.'
+    fireEvent.change(screen.getByRole('textbox', { name: 'Revised answer' }), { target: { value: revised } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send revised answer' }))
+
+    const revision = await screen.findByRole('region', { name: 'Assisted revision' })
+    expect(within(revision).getByText('What was held out?')).toBeTruthy()
+    const clarification = 'Reserve the test set until all model choices are final.'
+    const editor = within(revision).getByRole('textbox', { name: 'Clarified answer' })
+    expect(editor).toHaveProperty('value', revised)
+    fireEvent.change(editor, { target: { value: clarification } })
+    fireEvent.click(within(revision).getByRole('button', { name: 'Send clarified answer' }))
+
+    expect(await within(revision).findByText('Grade 3 of 3')).toBeTruthy()
+    expect(within(revision).getByText('First revised answer')).toBeTruthy()
+    expect(within(revision).getByText(revised)).toBeTruthy()
+    expect(within(revision).getByText('Clarified revision')).toBeTruthy()
+    expect(within(revision).getByText(clarification)).toBeTruthy()
+    const original = screen.getByRole('region', { name: 'Original attempt' })
+    expect(within(original).getByText('Grade 2 of 3')).toBeTruthy()
+    expect(fetch.mock.calls.filter(([path]) => path.endsWith('/revise'))).toHaveLength(1)
+  })
+
+  it('preserves both drafts when a status read sees a newer save before the local acknowledgement arrives', async () => {
+    const { fetch } = revisionApi()
+    const respond = fetch.getMockImplementation()!
+    let reads = 0
+    let resolveStatus: (response: Response) => void
+    let resolveSave: (response: Response) => void
+    fetch.mockImplementation(async (path, options) => {
+      if (path.endsWith('/previous/submission') && ++reads === 2) {
+        return new Promise(resolve => { resolveStatus = resolve })
+      }
+      if (path.endsWith('/revision-draft')) return new Promise(resolve => { resolveSave = resolve })
+      return respond(path, options)
+    })
+    render(<App />)
+    fireEvent.click(await screen.findByRole('button', { name: /Generalisation.*Assessed/ }))
+    await screen.findByRole('button', { name: 'Revise answer' })
+    fireEvent.click(screen.getByRole('link', { name: 'Settings' }))
+    await screen.findByRole('heading', { name: 'Settings' })
+    fireEvent.click(screen.getByRole('link', { name: 'Today' }))
+    await waitFor(() => expect(reads).toBe(2))
+    fireEvent.click(screen.getByRole('button', { name: 'Revise answer' }))
+    const editor = screen.getByRole('textbox', { name: 'Revised answer' })
+    const localText = 'The text I saved in this tab.'
+    const newText = 'Newer text saved in the other tab.'
+    fireEvent.change(editor, { target: { value: localText } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }))
+    await waitFor(() => expect(resolveSave).toBeDefined())
+    const earlier = await respond('/api/practice/items/previous/submission')
+    const saved: SavedSubmission = await earlier.json()
+    await act(async () => resolveStatus(Response.json({ ...saved, revision_draft: { text: newText, version: 2 } })))
+    await act(async () => resolveSave(Response.json({ text: localText, version: 1 })))
+
+    expect(await screen.findByRole('textbox', { name: 'Saved in another tab' })).toHaveProperty('value', newText)
+    expect(editor).toHaveProperty('value', localText)
+    expect(screen.getByRole('button', { name: 'Send revised answer' })).toHaveProperty('disabled', true)
   })
 })

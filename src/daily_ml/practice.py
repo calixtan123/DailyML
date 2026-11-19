@@ -15,6 +15,7 @@ from .config import bundled_defaults
 from .database import Database
 from .grading import GradingContext
 from .grading_jobs import enqueue_practice_request, practice_grading_status, public_request
+from .practice_versions import bind_grading_version, initialize_versions, save_answer_version
 from .scheduling import NEXT_DAY, ReviewState, due_concepts as scheduled_due_concepts, initialize_reviews, read_reviews
 
 DAILY_GOAL = 2
@@ -284,6 +285,7 @@ class Practice:
             for statement in _SCHEMA:
                 connection.execute(statement)
             initialize_reviews(connection, self.review_intervals)
+            initialize_versions(connection)
 
     def today(self, timezone: str) -> PracticeToday:
         """Get today's session, saving the recommendation pair if needed.
@@ -536,6 +538,13 @@ class Practice:
                     "INSERT INTO practice_submissions VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (item_id, text, day.timestamp, day.local_date, day.timezone, request_id, request_id),
                 )
+                support = connection.execute(
+                    "SELECT supported FROM practice_submission_support WHERE item_id = ?", (item_id,),
+                ).fetchone()
+                supported = support is not None and bool(support[0])
+                save_answer_version(
+                    connection, item_id, request_id, text, "original", "initial", supported, day.timestamp,
+                )
                 connection.execute(
                     """INSERT INTO practice_credits VALUES (?, ?, ?)
                        ON CONFLICT(question_id, local_date) DO NOTHING""",
@@ -571,6 +580,7 @@ class Practice:
             The requested practice identity does not exist.
         """
         with self.database.connect() as connection:
+            connection.execute("BEGIN")
             if not connection.execute("SELECT 1 FROM practice_items WHERE id = ?", (item_id,)).fetchone():
                 raise PracticeItemNotFound(item_id)
             return self._read_submission(connection, item_id)
@@ -609,44 +619,196 @@ class Practice:
         """
         self._validate_text(text)
         with self.database.connect(immediate=True) as connection:
-            current = self._current_request(connection, item_id)
+            current = self._current_request(connection, item_id, displayed_id=request_id)
             if current["id"] != request_id or current["state"] != "needs_clarification":
-                raise SubmissionConflict("This clarification is no longer open. Copy your text before refreshing grading.")
-            assessed_text = json.loads(current["context_json"])["answer"]
-            saved = self._clarification_draft(connection, request_id, assessed_text)
-            if saved.version != expected_version:
-                raise DraftConflict(saved)
-            if saved.text == text:
-                return saved
-            result = Draft(text, saved.version + 1)
-            connection.execute(
-                """INSERT INTO practice_clarification_drafts (request_id, text, version)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(request_id) DO UPDATE SET text = excluded.text, version = excluded.version""",
-                (request_id, result.text, result.version),
-            )
+                raise SubmissionConflict("This clarification is no longer open. Your submitted answers are saved.")
+            return self._save_follow_on_draft(connection, current, text, expected_version, kind="clarification")
+
+    @staticmethod
+    def _current_request(
+        connection: sqlite3.Connection, item_id: str, *, displayed_id: str | None = None,
+    ) -> sqlite3.Row:
+        """Resolve the current request on the original or the displayed request's revision track."""
+        connection.row_factory = sqlite3.Row
+        original = connection.execute("""
+            SELECT r.* FROM practice_submissions AS submission
+            JOIN practice_evaluated_requests AS r ON r.id = submission.current_request_id
+            WHERE submission.item_id = ?
+        """, (item_id,)).fetchone()
+        if original is None:
+            raise PracticeItemNotFound(item_id)
+        if displayed_id is None or displayed_id == original["id"]:
+            return original
+        displayed = connection.execute("""
+            SELECT role FROM practice_evaluated_requests WHERE id = ? AND item_id = ?
+        """, (displayed_id, item_id)).fetchone()
+        if displayed is None:
+            raise SubmissionConflict("Choose a grading request for this saved answer.")
+        if displayed["role"] == "original":
+            return original
+        return connection.execute("""
+            SELECT r.* FROM practice_revisions AS revision
+            JOIN practice_evaluated_requests AS r ON r.id = revision.current_request_id
+            WHERE revision.item_id = ?
+        """, (item_id,)).fetchone()
+
+    @staticmethod
+    def _follow_on_draft(
+        connection: sqlite3.Connection, request: sqlite3.Row, kind: Literal["clarification", "revision"],
+    ) -> Draft:
+        """Load the saved draft or prefill it with the exact evaluated answer."""
+        row = connection.execute(
+            f"SELECT text, version FROM practice_{kind}_drafts WHERE request_id = ?", (request["id"],),
+        ).fetchone()
+        return Draft(*row) if row is not None else Draft(request["submitted_text"], 0)
+
+    def _save_follow_on_draft(
+        self,
+        connection: sqlite3.Connection,
+        request: sqlite3.Row,
+        text: str,
+        expected_version: int,
+        *,
+        kind: Literal["clarification", "revision"],
+    ) -> Draft:
+        """Save an edit only if its version still matches the latest draft."""
+        saved = self._follow_on_draft(connection, request, kind)
+        if saved.version != expected_version:
+            raise DraftConflict(saved)
+        if saved.text == text:
+            return saved
+        result = Draft(text, saved.version + 1)
+        connection.execute(
+            f"""INSERT INTO practice_{kind}_drafts (request_id, text, version)
+                VALUES (?, ?, ?)
+                ON CONFLICT(request_id) DO UPDATE SET text = excluded.text, version = excluded.version""",
+            (request["id"], result.text, result.version),
+        )
         return result
 
     @staticmethod
-    def _current_request(connection: sqlite3.Connection, item_id: str) -> sqlite3.Row:
-        """Read the exact request that currently owns grading for this original."""
-        connection.row_factory = sqlite3.Row
-        current = connection.execute(
-            """SELECT r.* FROM practice_submissions s
-               JOIN grading_requests r ON r.id = s.current_request_id WHERE s.item_id = ?""",
-            (item_id,),
-        ).fetchone()
-        if current is None:
-            raise PracticeItemNotFound(item_id)
-        return current
+    def _check_revision_available(original: sqlite3.Row, request_id: str, revision_exists: bool) -> None:
+        """Require the current assessed original and an unused revision slot."""
+        if revision_exists:
+            raise SubmissionConflict("This answer already has its one revision.")
+        if original["id"] != request_id or original["state"] != "assessed":
+            raise SubmissionConflict("Open the current original assessment before revising.")
+
+    def save_revision_draft(self, item_id: str, request_id: str, text: str, *, expected_version: int) -> Draft:
+        """Save editable revision text without grading or spending the revision.
+
+        Parameters
+        ----------
+        item_id : str
+            Stable practice item ID.
+        request_id : str
+            Assessed original request shown beside the editor.
+        text : str
+            Exact editor text.
+        expected_version : int
+            Draft version last observed by the editor.
+
+        Returns
+        -------
+        Draft
+            Committed text and version.
+
+        Raises
+        ------
+        DraftInvalid
+            The draft exceeds the limit or contains invalid Unicode.
+        DraftConflict
+            The draft changed in another tab.
+        SubmissionConflict
+            The assessment cannot accept a revision or a revision already exists.
+        PracticeItemNotFound
+            The item has no saved original.
+        """
+        self._validate_text(text)
+        with self.database.connect(immediate=True) as connection:
+            original = self._current_request(connection, item_id)
+            revision_exists = connection.execute("SELECT 1 FROM practice_revisions WHERE item_id = ?", (item_id,))
+            self._check_revision_available(original, request_id, revision_exists.fetchone() is not None)
+            return self._save_follow_on_draft(connection, original, text, expected_version, kind="revision")
+
+    def revise(
+        self,
+        item_id: str,
+        request_id: str,
+        text: str,
+        *,
+        expected_version: int,
+        resolve_settings: Callable[[sqlite3.Connection], tuple[str, str | None]],
+    ) -> tuple[dict, str | None]:
+        """Commit the one assisted revision and its grading request together.
+
+        Parameters
+        ----------
+        item_id : str
+            Stable practice item ID.
+        request_id : str
+            Assessed original request on which the revision is based.
+        text : str
+            Exact revised answer to preserve.
+        expected_version : int
+            Draft version last observed by the editor.
+        resolve_settings : callable
+            Read effective model settings within the active transaction.
+
+        Returns
+        -------
+        tuple of dict and str or None
+            Updated submission view and the new request ID if it can dispatch.
+
+        Raises
+        ------
+        DraftInvalid
+            The answer is blank, exceeds the limit or contains invalid Unicode.
+        DraftConflict
+            The draft changed in another tab.
+        SubmissionConflict
+            A different revision already exists or the original is not assessed.
+        PracticeItemNotFound
+            The item has no saved original.
+        """
+        self._validate_text(text, submitted=True)
+        with self.database.connect(immediate=True) as connection:
+            original = self._current_request(connection, item_id)
+            earlier = connection.execute("""
+                SELECT initial.submitted_text, initial.parent_version_id FROM practice_revisions AS revision
+                JOIN practice_evaluated_requests AS initial ON initial.id = revision.initial_request_id
+                WHERE revision.item_id = ?
+            """, (item_id,)).fetchone()
+            if earlier is not None and request_id == original["id"] and (
+                earlier["parent_version_id"], earlier["submitted_text"]
+            ) == (original["submission_version_id"], text):
+                return self._read_submission(connection, item_id), None
+            self._check_revision_available(original, request_id, earlier is not None)
+            draft = self._follow_on_draft(connection, original, "revision")
+            if draft.version != expected_version:
+                raise DraftConflict(draft)
+            _, model_id = resolve_settings(connection)
+            timestamp = self._clock().timestamp()
+            context = GradingContext.model_validate_json(original["context_json"]).model_copy(update={"answer": text})
+            new_id = enqueue_practice_request(
+                connection, context, model_id, timestamp, mode=self._request_mode(original, model_id),
+            )
+            save_answer_version(
+                connection, item_id, new_id, text, "revision", "revision", True, timestamp,
+                parent_version_id=original["submission_version_id"],
+            )
+            connection.execute("INSERT INTO practice_revisions VALUES (?, ?, ?)", (item_id, new_id, new_id))
+            connection.execute("DELETE FROM practice_revision_drafts WHERE request_id = ?", (request_id,))
+            return self._read_submission(connection, item_id), new_id if model_id else None
 
     @staticmethod
-    def _clarification_draft(connection: sqlite3.Connection, request_id: str, assessed_text: str) -> Draft:
-        """Load the draft, using the previously sent answer as the first editable version."""
-        row = connection.execute(
-            "SELECT text, version FROM practice_clarification_drafts WHERE request_id = ?", (request_id,),
-        ).fetchone()
-        return Draft(*row) if row is not None else Draft(assessed_text, 0)
+    def _request_mode(current: sqlite3.Row, model_id: str | None) -> str:
+        """Carry forward fallback format only for the same model."""
+        if model_id == current["model_id"] and (
+            current["schema_mode"] == "json" or current["error"] == "schema_unsupported"
+        ):
+            return "json"
+        return "schema"
 
     def retry_submission(
         self,
@@ -691,12 +853,19 @@ class Practice:
         if text is not None:
             self._validate_text(text, submitted=True)
         with self.database.connect(immediate=True) as connection:
-            current = self._current_request(connection, item_id)
+            current = self._current_request(connection, item_id, displayed_id=request_id)
             if current["id"] != request_id:
-                if current["retry_of"] == request_id and (
-                    text is None or json.loads(current["context_json"])["answer"] == text
-                ):
-                    return self._read_submission(connection, item_id), None
+                child = connection.execute("""
+                    SELECT child.submission_version_id, child.submitted_text, parent.submission_version_id
+                    FROM practice_evaluated_requests AS child
+                    JOIN practice_evaluated_requests AS parent ON parent.id = child.retry_of
+                    WHERE child.retry_of = ?
+                """, (request_id,)).fetchone()
+                if child is not None:
+                    child_version, child_text, parent_version = child
+                    same_action = (text == child_text) if child_version != parent_version else (text is None)
+                    if same_action:
+                        return self._read_submission(connection, item_id), None
                 raise SubmissionConflict("Grading changed in another tab. Reload the saved answer before retrying.")
             if current["state"] == "needs_clarification":
                 if text is None:
@@ -708,22 +877,25 @@ class Practice:
                 raise SubmissionConflict("Choose a model in Settings before sending your saved answer.")
             context = GradingContext.model_validate_json(current["context_json"])
             if text is not None:
-                draft = self._clarification_draft(connection, request_id, context.answer)
+                draft = self._follow_on_draft(connection, current, "clarification")
                 if draft.version != expected_version:
                     raise DraftConflict(draft)
                 context = context.model_copy(update={"answer": text})
-            use_json = model_id == current["model_id"] and (
-                current["schema_mode"] == "json" or current["error"] == "schema_unsupported"
-            )
+            timestamp = self._clock().timestamp()
             new_id = enqueue_practice_request(
-                connection, context, model_id, self._clock().timestamp(),
-                retry_of=request_id, mode="json" if use_json else "schema",
+                connection, context, model_id, timestamp,
+                retry_of=request_id, mode=self._request_mode(current, model_id),
             )
-            connection.execute(
-                "UPDATE practice_submissions SET current_request_id=? WHERE item_id=?", (new_id, item_id),
-            )
-            if text is not None:
+            if text is None:
+                bind_grading_version(connection, new_id, current["submission_version_id"])
+            else:
+                save_answer_version(
+                    connection, item_id, new_id, text, current["role"], "clarification",
+                    bool(current["supported"]), timestamp, parent_version_id=current["submission_version_id"],
+                )
                 connection.execute("DELETE FROM practice_clarification_drafts WHERE request_id = ?", (request_id,))
+            track_table = "practice_revisions" if current["role"] == "revision" else "practice_submissions"
+            connection.execute(f"UPDATE {track_table} SET current_request_id=? WHERE item_id=?", (new_id, item_id))
             return self._read_submission(connection, item_id), new_id if model_id else None
 
     @staticmethod
@@ -733,32 +905,75 @@ class Practice:
             "awaiting_access", "awaiting_allowance", "outcome_unknown", "failed_recoverable",
         ) or (request["state"] == "queued" and request["error"] == "unsent")
 
-    @staticmethod
-    def _read_submission(connection: sqlite3.Connection, item_id: str) -> dict | None:
-        """Project a submission and its current request from the same SQLite snapshot."""
+    @classmethod
+    def _answer_view(cls, connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
+        """Project the current answer, feedback and clarification draft for a track."""
+        clarification = (
+            cls._follow_on_draft(connection, row, "clarification") if row["state"] == "needs_clarification" else None
+        )
+        return {
+            "assessed_text": row["submitted_text"],
+            "submission_version_id": row["submission_version_id"],
+            "supported": bool(row["supported"]),
+            "clarification_draft": asdict(clarification) if clarification else None,
+            "request": public_request(row),
+        }
+
+    @classmethod
+    def _read_submission(cls, connection: sqlite3.Connection, item_id: str) -> dict | None:
+        """Project original and revision evidence from the same SQLite snapshot."""
         connection.row_factory = sqlite3.Row
         row = connection.execute(
             """SELECT r.*, s.original_text, s.completed_at, s.completed_date, s.completed_timezone,
+                      revision.current_request_id AS revision_request_id,
                       EXISTS (SELECT 1 FROM practice_credits c WHERE c.item_id = s.item_id) AS credited
-               FROM practice_submissions s JOIN grading_requests r ON r.id = s.current_request_id
+               FROM practice_submissions AS s
+               JOIN practice_evaluated_requests AS r ON r.id = s.current_request_id
+               LEFT JOIN practice_revisions AS revision ON revision.item_id = s.item_id
                WHERE s.item_id = ?""", (item_id,),
         ).fetchone()
         if row is None:
             return None
-        assessed_text = json.loads(row["context_json"])["answer"]
-        clarification = (
-            Practice._clarification_draft(connection, row["id"], assessed_text)
-            if row["state"] == "needs_clarification" else None
-        )
+        revision = None
+        revision_draft = None
+        if row["revision_request_id"] is not None:
+            revision_request = connection.execute(
+                "SELECT * FROM practice_evaluated_requests WHERE id = ?", (row["revision_request_id"],),
+            ).fetchone()
+            revision = cls._answer_view(connection, revision_request)
+        elif row["state"] == "assessed":
+            revision_draft = asdict(cls._follow_on_draft(connection, row, "revision"))
+        versions = [
+            {
+                "id": version["submission_version_id"],
+                "role": version["role"],
+                "kind": version["version_kind"],
+                "parent_version_id": version["parent_version_id"],
+                "text": version["submitted_text"],
+                "supported": bool(version["supported"]),
+                "created_at": version["version_created_at"],
+                "request": public_request(version),
+            }
+            for version in connection.execute("""
+                SELECT r.* FROM practice_evaluated_requests AS r
+                WHERE r.item_id = ? AND NOT EXISTS (
+                    SELECT 1 FROM grading_requests AS child
+                    JOIN practice_grading_versions AS link ON link.request_id = child.id
+                    WHERE child.retry_of = r.id AND link.version_id = r.submission_version_id
+                )
+                ORDER BY r.ordinal
+            """, (item_id,))
+        ]
         return {
             "text": row["original_text"],
             "completed_at": row["completed_at"],
             "completed_date": row["completed_date"],
             "completed_timezone": row["completed_timezone"],
             "credited": bool(row["credited"]),
-            "assessed_text": assessed_text,
-            "clarification_draft": asdict(clarification) if clarification else None,
-            "request": public_request(row),
+            **cls._answer_view(connection, row),
+            "versions": versions,
+            "revision": revision,
+            "revision_draft": revision_draft,
         }
 
     @staticmethod
@@ -952,7 +1167,9 @@ class Practice:
                    FROM practice_selections AS selection
                    JOIN practice_items AS item ON item.id = selection.item_id
                    LEFT JOIN practice_submissions AS submission ON submission.item_id = item.id
-                   LEFT JOIN grading_requests AS request ON request.id = submission.current_request_id
+                   LEFT JOIN practice_revisions AS revision ON revision.item_id = item.id
+                   LEFT JOIN grading_requests AS request
+                     ON request.id = COALESCE(revision.current_request_id, submission.current_request_id)
                    WHERE selection.local_date = ?
                    ORDER BY selection.slot""",
                 (local_date,),
@@ -974,27 +1191,53 @@ class Practice:
             )
         ]
         calendar_date = date.fromisoformat(local_date)
-        week_start = (calendar_date - timedelta(days=calendar_date.weekday())).isoformat()
+        week_start = calendar_date - timedelta(days=calendar_date.weekday())
+        week_start_time = datetime.combine(
+            week_start, datetime.min.time(), tzinfo=ZoneInfo(day.timezone),
+        ).timestamp()
         counts = dict(connection.execute(
             """SELECT local_date, COUNT(*) FROM practice_credits
                WHERE local_date BETWEEN ? AND ? GROUP BY local_date""",
-            (week_start, local_date),
+            (week_start.isoformat(), local_date),
         ))
         first_use_date, = connection.execute("SELECT MIN(local_date) FROM practice_days").fetchone()
+        # Preserve pending work and drafts across weeks. Keep one older assessment
+        # on each track per question available for revision or comparison.
         submitted = [
             self._item(row)
             for row in connection.execute(
-                """SELECT item.id, item.local_date, item.section_title,
-                          item.snapshot_json, item.draft_text, item.draft_version, request.state, request.error
-                   FROM practice_submissions AS submission
-                   JOIN practice_items AS item ON item.id = submission.item_id
-                   JOIN grading_requests AS request ON request.id = submission.current_request_id
-                   WHERE (submission.completed_date >= ? OR request.state <> 'assessed')
+                """WITH submitted_requests AS (
+                       SELECT item.id, item.question_id, item.local_date, item.section_title,
+                              item.snapshot_json, item.draft_text, item.draft_version, request.state, request.error,
+                              request.id AS request_id, request.created_at AS request_at,
+                              submission.completed_date, revision.item_id IS NOT NULL AS has_revision,
+                              CASE WHEN revision.item_id IS NULL THEN submission.completed_at
+                                   ELSE request.created_at END AS activity_at
+                       FROM practice_submissions AS submission
+                       JOIN practice_items AS item ON item.id = submission.item_id
+                       LEFT JOIN practice_revisions AS revision ON revision.item_id = submission.item_id
+                       JOIN grading_requests AS request
+                         ON request.id = COALESCE(revision.current_request_id, submission.current_request_id)
+                   ),
+                   older_assessments AS (
+                       SELECT id, ROW_NUMBER() OVER (
+                           PARTITION BY question_id, has_revision ORDER BY activity_at DESC, id
+                       ) AS recency
+                       FROM submitted_requests
+                       WHERE state = 'assessed' AND completed_date < :week_start AND request_at < :week_start_time
+                   )
+                   SELECT item.id, item.local_date, item.section_title, item.snapshot_json,
+                          item.draft_text, item.draft_version, item.state, item.error
+                   FROM submitted_requests AS item
+                   WHERE (item.completed_date >= :week_start OR item.state <> 'assessed'
+                          OR item.request_at >= :week_start_time
+                          OR EXISTS (SELECT 1 FROM practice_revision_drafts WHERE request_id = item.request_id)
+                          OR item.id IN (SELECT id FROM older_assessments WHERE recency = 1))
                      AND NOT EXISTS (
-                        SELECT 1 FROM practice_selections WHERE local_date = ? AND item_id = item.id
+                         SELECT 1 FROM practice_selections WHERE local_date = :local_date AND item_id = item.id
                      )
-                   ORDER BY submission.completed_at DESC, item.id""",
-                (week_start, local_date),
+                   ORDER BY item.activity_at DESC, item.id""",
+                {"week_start": week_start.isoformat(), "week_start_time": week_start_time, "local_date": local_date},
             )
         ]
         recommended = sum(selection.kind in ("review", "variety") for selection in selections)

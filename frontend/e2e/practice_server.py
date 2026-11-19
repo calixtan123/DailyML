@@ -9,6 +9,7 @@ from pathlib import Path
 from daily_ml import app, cli
 from daily_ml.database import Database
 from daily_ml.grading import validate_feedback
+from daily_ml.grading_jobs import GradingJobs
 from daily_ml.practice import Practice
 from daily_ml.provider import ProviderResult
 
@@ -49,7 +50,13 @@ class OfflineProvider:
 def main():
     """Configure the disposable test app and launch it through its normal entry point."""
     clock_file = Path(os.environ["DML_E2E_CLOCK"])
-    app.Practice = partial(Practice, clock=lambda: datetime.fromisoformat(clock_file.read_text()))
+
+    def test_time() -> datetime:
+        """Read the current fixture time shared by practice and grading."""
+        return datetime.fromisoformat(clock_file.read_text())
+
+    app.Practice = partial(Practice, clock=test_time)
+    app.GradingJobs = partial(GradingJobs, clock=lambda: test_time().timestamp())
     app.Provider = OfflineProvider
     database = Database(Path(os.environ["DML_DATA_DIR"]))
     preferences = database.get_preferences()

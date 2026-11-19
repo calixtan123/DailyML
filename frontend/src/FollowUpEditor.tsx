@@ -8,13 +8,14 @@ type SaveState =
   | { kind: 'conflict'; saved: Draft }
   | { kind: 'closed' }
 
-export type ClarificationEdit = { text: string; base: Draft }
+export type FollowUpEdit = { text: string; base: Draft }
 
 type Props = {
+  kind: 'clarification' | 'revision'
   draft: Draft
-  edit: ClarificationEdit | undefined
+  edit: FollowUpEdit | undefined
   closedByRefresh: boolean
-  onEdit: (edit: ClarificationEdit | undefined) => void
+  onEdit: (edit: FollowUpEdit | undefined) => void
   answerLimit: number
   navigationPending: boolean
   leaveEditor: RefObject<LeaveEditor | null>
@@ -24,9 +25,9 @@ type Props = {
   refresh: () => void
 }
 
-/** Keep a clarification editable until its local save or grading action is confirmed. */
-export function ClarificationEditor({
-  draft, edit, closedByRefresh, onEdit, answerLimit, leaveEditor, navigationPending, save, onSaved, send, refresh,
+/** Keep a follow-up answer editable until its save or grading action is confirmed. */
+export function FollowUpEditor({
+  kind, draft, edit, closedByRefresh, onEdit, answerLimit, leaveEditor, navigationPending, save, onSaved, send, refresh,
 }: Props) {
   const [saveState, setSaveState] = useState<SaveState>({ kind: 'idle' })
   const [sendError, setSendError] = useState('')
@@ -35,6 +36,7 @@ export function ClarificationEditor({
   const pending = useRef(false)
   const input = useRef<HTMLTextAreaElement>(null)
   const problem = useRef<HTMLParagraphElement>(null)
+  const answerLabel = kind === 'revision' ? 'Revised answer' : 'Clarified answer'
   const text = edit?.text ?? draft.text
   const dirty = edit !== undefined && text !== edit.base.text
   const count = Array.from(text).length
@@ -44,6 +46,10 @@ export function ClarificationEditor({
   const actionPending = busy || navigationPending
 
   useUnsavedDraftWarning(dirty)
+
+  useEffect(() => {
+    if (kind === 'revision') input.current?.focus()
+  }, [kind])
 
   useEffect(() => {
     if (blocked || saveState.kind === 'error' || sendError) problem.current?.focus()
@@ -70,7 +76,7 @@ export function ClarificationEditor({
 
   async function persist(version = edit?.base.version ?? draft.version): Promise<Draft | undefined> {
     if (overLimit) {
-      setSaveState({ kind: 'error', message: 'Shorten your clarification before saving or switching questions.' })
+      setSaveState({ kind: 'error', message: `Shorten your ${kind} before saving or switching questions.` })
       return
     }
     setSaveState({ kind: 'saving' })
@@ -82,7 +88,7 @@ export function ClarificationEditor({
       return saved
     } catch (error) {
       if (!showConflict(error)) setSaveState({
-        kind: 'error', message: 'Could not save your clarification draft. Your text is still here.',
+        kind: 'error', message: `Could not save your ${kind} draft. Your text is still here.`,
       })
     }
   }
@@ -117,7 +123,7 @@ export function ClarificationEditor({
       await send(saved)
     } catch (error) {
       if (!showConflict(error)) setSendError(
-        'Could not confirm grading. Your clarification draft is saved. You can refresh grading status or try sending again.',
+        `Could not confirm grading. Your ${kind} draft is saved. You can refresh grading status or try sending again.`,
       )
     }
   }
@@ -135,9 +141,9 @@ export function ClarificationEditor({
 
   return (
     <>
-      <label htmlFor="clarified-answer">Clarified answer</label>
-      <textarea id="clarified-answer" ref={input} rows={6} value={text} readOnly={actionPending || closed} spellCheck={false}
-        aria-describedby={`${closed ? 'clarification-closed' : 'clarification-help'} clarification-limit`}
+      <label htmlFor="follow-up-answer">{answerLabel}</label>
+      <textarea id="follow-up-answer" ref={input} rows={6} value={text} readOnly={actionPending || closed} spellCheck={false}
+        aria-describedby={`${closed ? 'follow-up-closed' : 'follow-up-help'} follow-up-limit`}
         aria-invalid={overLimit || undefined}
         onChange={event => {
           if (actionPending || closed) return
@@ -146,16 +152,16 @@ export function ClarificationEditor({
           if (saveState.kind === 'saved') setSaveState({ kind: 'idle' })
         }} />
       <div className="today-editor-caption">
-        {!closed && <p id="clarification-help">
+        {!closed && <p id="follow-up-help">
           Save your draft here or switch questions to save it. Send when you’re ready for grading.
         </p>}
-        <p id="clarification-limit" className={overLimit ? 'error' : undefined} aria-live={overLimit ? 'polite' : 'off'}>
+        <p id="follow-up-limit" className={overLimit ? 'error' : undefined} aria-live={overLimit ? 'polite' : 'off'}>
           {count.toLocaleString('en-GB')} / {answerLimit.toLocaleString('en-GB')} characters
         </p>
       </div>
       <div className="actions today-draft-actions">
         <button className="primary" type="button" disabled={actionPending || blocked || overLimit || !text.trim()}
-          onClick={() => void run(sendAnswer)}>Send clarified answer</button>
+          onClick={() => void run(sendAnswer)}>{kind === 'revision' ? 'Send revised answer' : 'Send clarified answer'}</button>
         <button type="button" disabled={actionPending || blocked || overLimit || !dirty} onClick={() => void run(persist)}>
           {saveState.kind === 'error' ? 'Retry save' : 'Save draft'}
         </button>
@@ -177,8 +183,8 @@ export function ClarificationEditor({
           <p role="alert" tabIndex={-1} ref={problem}>
             This draft changed in another tab. Review both versions before choosing which to keep.
           </p>
-          <label htmlFor="saved-clarification">Saved in another tab</label>
-          <textarea id="saved-clarification" readOnly rows={4} value={saveState.saved.text} />
+          <label htmlFor="saved-follow-up">Saved in another tab</label>
+          <textarea id="saved-follow-up" readOnly rows={4} value={saveState.saved.text} />
           <div className="actions">
             <button type="button" disabled={actionPending} onClick={() => acknowledge(saveState.saved, false)}>Use saved version</button>
             <button type="button" disabled={actionPending || overLimit}
@@ -188,8 +194,8 @@ export function ClarificationEditor({
       )}
       {closed && (
         <div className="today-conflict">
-          <p id="clarification-closed" role="alert" tabIndex={-1} ref={problem}>
-            This clarification is closed. Copy your text if you want to keep it.
+          <p id="follow-up-closed" role="alert" tabIndex={-1} ref={problem}>
+            This {kind} is closed. Copy your text if you want to keep it.
           </p>
           <button type="button" disabled={actionPending} onClick={() => {
             onEdit(undefined)
