@@ -710,8 +710,11 @@ class Practice:
         with self.database.connect(immediate=True) as connection:
             connection.row_factory = sqlite3.Row
             target = connection.execute("""
-                SELECT * FROM practice_evaluated_requests
-                WHERE id = ? AND item_id = ? AND state = 'assessed'
+                SELECT assessed.* FROM practice_evaluated_requests AS assessed
+                JOIN practice_submissions AS submission ON submission.item_id = assessed.item_id
+                LEFT JOIN practice_revisions AS revision ON revision.item_id = assessed.item_id
+                WHERE assessed.id = ? AND assessed.item_id = ? AND assessed.state = 'assessed'
+                  AND (assessed.id = submission.current_request_id OR assessed.id = revision.current_request_id)
             """, (request_id, item_id)).fetchone()
             if target is None:
                 raise SubmissionConflict("Choose an assessed saved answer to dispute.")
@@ -730,7 +733,8 @@ class Practice:
             return self._read_submission(connection, item_id)
 
     def reassess_dispute(
-        self, item_id: str, dispute_id: str, *, resolve_settings: Callable[[sqlite3.Connection], tuple[str, str | None]],
+        self, item_id: str, dispute_id: str, idempotency_key: str, *,
+        resolve_settings: Callable[[sqlite3.Connection], tuple[str, str | None]],
     ) -> tuple[dict, str | None]:
         """Queue or reuse one reassessment of the immutable disputed submission."""
         with self.database.connect(immediate=True) as connection:
@@ -740,12 +744,22 @@ class Practice:
             """, (dispute_id, item_id)).fetchone()
             if dispute is None:
                 raise SubmissionConflict("This dispute is no longer open.")
+            action = connection.execute("""
+                SELECT dispute_id FROM practice_dispute_reassessment_actions WHERE action_key = ?
+            """, (idempotency_key,)).fetchone()
+            if action is not None:
+                if action["dispute_id"] != dispute_id:
+                    raise SubmissionConflict("This reassessment action already belongs to another dispute.")
+                return self._read_submission(connection, item_id), None
             latest = connection.execute("""
                 SELECT request.* FROM practice_dispute_reassessments AS link
                 JOIN grading_requests AS request ON request.id = link.request_id
                 WHERE link.dispute_id = ? ORDER BY request.created_at DESC, request.rowid DESC LIMIT 1
             """, (dispute_id,)).fetchone()
-            if latest is not None and latest["state"] in ("queued", "preparing", "in_flight", "assessed"):
+            if latest is not None and (
+                latest["state"] in ("preparing", "in_flight", "assessed")
+                or (latest["state"] == "queued" and latest["error"] is None)
+            ):
                 return self._read_submission(connection, item_id), None
             _, model_id = resolve_settings(connection)
             if model_id is None:
@@ -754,16 +768,27 @@ class Practice:
             context = GradingContext.model_validate_json(target["context_json"]).model_copy(update={"objection": dispute["objection"]})
             request_id = enqueue_practice_request(
                 connection, context, model_id, self._clock().timestamp(), retry_of=latest["id"] if latest else None,
-                mode=self._request_mode(target, model_id),
+                mode=self._request_mode(latest or target, model_id),
             )
             register_reassessment(connection, dispute_id, request_id)
+            connection.execute(
+                "INSERT INTO practice_dispute_reassessment_actions VALUES (?, ?, ?)",
+                (idempotency_key, dispute_id, request_id),
+            )
             return self._read_submission(connection, item_id), request_id
 
-    def resolve_dispute(self, item_id: str, dispute_id: str, assessment_request_id: str) -> dict:
+    def resolve_dispute(
+        self, item_id: str, dispute_id: str, assessment_request_id: str, *,
+        resolve_settings: Callable[[sqlite3.Connection], tuple[str, str | None]],
+    ) -> dict:
         """Accept one assessment belonging to an open dispute in one transaction."""
         with self.database.connect(immediate=True) as connection:
             try:
-                resolve_dispute(connection, dispute_id, assessment_request_id, self.review_intervals, self._clock().timestamp())
+                timezone, _ = resolve_settings(connection)
+                resolve_dispute(
+                    connection, item_id, dispute_id, assessment_request_id, self.review_intervals,
+                    self._clock().timestamp(), timezone,
+                )
             except LookupError as error:
                 raise SubmissionConflict(str(error)) from None
             return self._read_submission(connection, item_id)
@@ -1315,10 +1340,14 @@ class Practice:
             }
             for version in connection.execute("""
                 SELECT r.* FROM practice_evaluated_requests AS r
+                JOIN grading_requests AS request ON request.id = r.id
                 WHERE r.item_id = ? AND NOT EXISTS (
-                    SELECT 1 FROM grading_requests AS child
-                    JOIN practice_grading_versions AS link ON link.request_id = child.id
-                    WHERE child.retry_of = r.id AND link.version_id = r.submission_version_id
+                    SELECT 1 FROM practice_evaluated_requests AS newer
+                    JOIN grading_requests AS newer_request ON newer_request.id = newer.id
+                    WHERE newer.submission_version_id = r.submission_version_id
+                      AND (newer_request.created_at > request.created_at
+                           OR (newer_request.created_at = request.created_at
+                               AND newer_request.rowid > request.rowid))
                 )
                 ORDER BY r.ordinal
             """, (item_id,))

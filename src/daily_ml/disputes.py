@@ -30,6 +30,13 @@ _SCHEMA = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS practice_dispute_reassessments_by_dispute ON practice_dispute_reassessments(dispute_id)",
+    """
+    CREATE TABLE IF NOT EXISTS practice_dispute_reassessment_actions (
+        action_key TEXT PRIMARY KEY,
+        dispute_id TEXT NOT NULL REFERENCES practice_disputes(id),
+        request_id TEXT NOT NULL UNIQUE REFERENCES practice_dispute_reassessments(request_id)
+    )
+    """,
 )
 
 
@@ -60,10 +67,10 @@ def dispute_projection(connection: sqlite3.Connection, item_id: str, dispute_id:
     if dispute is None:
         return None
     assessments = connection.execute("""
-        SELECT request.* FROM grading_requests AS request
+        SELECT request.* FROM practice_evaluated_requests AS request
         WHERE request.id = ? OR request.id IN (
             SELECT request_id FROM practice_dispute_reassessments WHERE dispute_id = ?
-        ) ORDER BY request.created_at, request.rowid
+        ) ORDER BY request.created_at, request.id
     """, (dispute["target_request_id"], dispute["id"])).fetchall()
     return {
         "id": dispute["id"], "status": "resolved" if dispute["selected_request_id"] else "open",
@@ -92,12 +99,14 @@ def register_reassessment(
     connection.execute("INSERT INTO practice_dispute_reassessments VALUES (?, ?)", (request_id, dispute_id))
 
 
-def selected_reassessment_evidence(connection: sqlite3.Connection, dispute_id: str, request_id: str) -> str:
+def selected_reassessment_evidence(
+    connection: sqlite3.Connection, dispute_id: str, request_id: str, *, accepted_at: float, timezone: str,
+) -> str:
     """Create immutable review evidence for the chosen completed reassessment."""
     row = connection.execute("""
         SELECT dispute.item_id, request.id, json_extract(item.snapshot_json, '$.concept_id'),
                submission.completed_at, submission.completed_date, request.grade, version.supported,
-               request.finished_at, submission.completed_timezone
+               request.finished_at
         FROM practice_disputes AS dispute
         JOIN practice_dispute_reassessments AS reassessment ON reassessment.dispute_id = dispute.id
         JOIN grading_requests AS request ON request.id = reassessment.request_id
@@ -109,8 +118,8 @@ def selected_reassessment_evidence(connection: sqlite3.Connection, dispute_id: s
     """, (dispute_id, request_id)).fetchone()
     if row is None:
         raise LookupError("Choose an assessed reassessment for this dispute.")
-    item_id, evidence_id, concept_id, submitted_at, submitted_date, grade, supported, finished_at, timezone = row
-    accepted = datetime.fromtimestamp(finished_at, UTC).astimezone(ZoneInfo(timezone)).date().isoformat()
+    item_id, evidence_id, concept_id, submitted_at, submitted_date, grade, supported, _finished_at = row
+    accepted = datetime.fromtimestamp(accepted_at, UTC).astimezone(ZoneInfo(timezone)).date().isoformat()
     connection.execute("""
         INSERT OR IGNORE INTO review_evidence
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -119,11 +128,14 @@ def selected_reassessment_evidence(connection: sqlite3.Connection, dispute_id: s
 
 
 def resolve_dispute(
-    connection: sqlite3.Connection, dispute_id: str, assessment_request_id: str, intervals: tuple[int, ...], now: float,
+    connection: sqlite3.Connection, item_id: str, dispute_id: str, assessment_request_id: str,
+    intervals: tuple[int, ...], now: float, timezone: str,
 ) -> None:
     """Atomically validate and choose one assessment, then replay original evidence."""
     connection.row_factory = sqlite3.Row
-    dispute = connection.execute("SELECT * FROM practice_disputes WHERE id = ?", (dispute_id,)).fetchone()
+    dispute = connection.execute(
+        "SELECT * FROM practice_disputes WHERE id = ? AND item_id = ?", (dispute_id, item_id),
+    ).fetchone()
     if dispute is None or dispute["selected_request_id"] is not None:
         raise LookupError("This dispute is no longer open.")
     chosen = connection.execute("""
@@ -140,7 +152,9 @@ def resolve_dispute(
     selected = assessment_request_id
     if dispute["role"] == "original":
         if selected != dispute["target_request_id"]:
-            selected = selected_reassessment_evidence(connection, dispute_id, selected)
+            selected = selected_reassessment_evidence(
+                connection, dispute_id, selected, accepted_at=now, timezone=timezone,
+            )
         select_review_evidence(connection, dispute["item_id"], selected, intervals)
     updated = connection.execute("""
         UPDATE practice_disputes SET selected_request_id = ?, resolved_at = ?
