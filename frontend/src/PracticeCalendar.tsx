@@ -53,6 +53,11 @@ export function PracticeCalendar({ localDate, firstUseDate, counts, goal }: {
           )
         })}
       </ol>
+      <ul className="practice-legend" role="list" aria-label="Calendar legend">
+        <li>0 No practice</li>
+        <li>1 Partial</li>
+        <li>{goal}+ Goal met</li>
+      </ul>
     </section>
   )
 }

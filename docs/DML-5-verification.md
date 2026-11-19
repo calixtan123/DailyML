@@ -21,3 +21,14 @@ The existing grading ledger records request state, provider usage, and validated
 | `DML_E2E_EXECUTABLE=/private/tmp/dml5-verify.sXg9zmtc/venv/bin/daily-ml npm --prefix frontend run test:e2e -- --output=/private/tmp/dml5-verify.sXg9zmtc/browser-results` | Two Chromium journeys passed in 4.7 s, exit 0. Covers an overnight two-tab submission, one credit and one model attempt, other practice while grading, refresh and stored feedback, polling cleanup, 320–1440 px overflow checks, and the existing drafts/Settings journey. |
 
 The first sandboxed runs could not open Chromium's macOS Mach port or bind temporary loopback ports. The complete runs passed with approved loopback access. An editable install omitted the package from Python imports locally. The verification environment used the locked dependencies and installed the built wheel into a disposable virtual environment. Provider responses and clocks were controlled locally. Live ChatGPT-plan grading remains pending under the DML-2 real-account acceptance check.
+
+## Submission notice and calendar legend review follow-up
+
+The answer editor shows which data OpenAI receives for grading and uses the same visible notice as the submit button's accessible description. The calendar explains all three count categories even when the current week contains only zero-credit days. Each date retains its accessible status.
+
+| Command | Result |
+| --- | --- |
+| `npm --prefix frontend test -- --run src/Today.test.tsx -t 'shows what OpenAI receives\|shows a calendar legend' --reporter=dot` (before the fix) | Both regression tests failed on the missing text, exit 1. |
+| `npm --prefix frontend test -- --run` (after the fix) | 37 passed across five files, exit 0. |
+| `npm --prefix frontend run typecheck` | Exit 0. |
+| `npm --prefix frontend run build` | Exit 0. |

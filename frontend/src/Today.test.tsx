@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
 
@@ -164,6 +164,28 @@ describe('Today practice editor', () => {
     expect(await screen.findByRole('button', { name: /Model monitoring/ })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Generalisation' })).toBeTruthy()
     expect((editor as HTMLTextAreaElement).value).toBe('Still editing after midnight.')
+  })
+
+  it('shows what OpenAI receives and describes the submit button with that notice', async () => {
+    practiceApi()
+    render(<App />)
+    const description = 'For grading, OpenAI receives your answer, the question, its marking guide and reference material.'
+    const editor = await screen.findByRole('textbox', { name: 'Your answer' })
+    fireEvent.change(editor, { target: { value: 'My answer for grading.' } })
+
+    expect(screen.getByText(description)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Submit answer', description })).toHaveProperty('disabled', false)
+  })
+
+  it('shows a calendar legend for all completion states in a week with no practice', async () => {
+    practiceApi()
+    render(<App />)
+
+    const calendar = await screen.findByRole('region', { name: 'Weekly practice calendar' })
+    expect(within(calendar).getByText('0 No practice')).toBeTruthy()
+    expect(within(calendar).getByText('1 Partial')).toBeTruthy()
+    expect(within(calendar).getByText('2+ Goal met')).toBeTruthy()
+    expect(within(calendar).getByLabelText(/Thursday, 19 November 2026, 0 completed, No practice/)).toBeTruthy()
   })
 
   it('credits a saved submission before grading and keeps the other question usable', async () => {

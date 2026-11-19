@@ -454,8 +454,12 @@ export function Today({ request, active, leaveToday }: {
                   {characterCount.toLocaleString('en-GB')} / {session.answer_limit.toLocaleString('en-GB')} characters
                 </p>
               </div>
+              <p id="submission-privacy" className="today-submission-privacy">
+                For grading, OpenAI receives your answer, the question, its marking guide and reference material.
+              </p>
               <div className="actions today-draft-actions">
                 <button className="primary" type="button"
+                  aria-describedby="submission-privacy"
                   disabled={controlsDisabled || overLimit || !editor.text.trim()}
                   onClick={() => void run(submitAnswer)}>Submit answer</button>
                 <button type="button"

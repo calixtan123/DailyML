@@ -135,6 +135,16 @@ input { background: var(--input); min-width: 0; width: 180px; }
 .practice-week time[aria-current] { border-color: var(--accent); }
 .practice-week [data-completion="Partial"] strong { color: var(--warning); }
 .practice-week [data-completion="Goal met"] strong { color: var(--accent); }
+.practice-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-top: 8px;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: 13px;
+}
 .practice-credit { color: var(--muted); }
 .practice-feedback { display: grid; gap: 12px; }
 .practice-feedback h4 { margin: 12px 0 4px; font-size: 15px; }
@@ -184,7 +194,9 @@ input { background: var(--input); min-width: 0; width: 180px; }
 .today-editor textarea[aria-invalid] { border-color: var(--error); }
 .today-editor-caption { margin-top: 6px; color: var(--muted); font-size: 13px; }
 .today-editor-caption .error { margin: 0; }
-.today-draft-actions, .today-copy { margin-top: 16px; }
+.today-submission-privacy { margin-top: 12px; color: var(--muted); font-size: 13px; }
+.today-draft-actions { margin-top: 8px; }
+.today-copy { margin-top: 16px; }
 .today-save-status { color: var(--muted); }
 .today-conflict { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; }
 .today-conflict [role="alert"] { color: var(--warning); margin-bottom: 10px; }
