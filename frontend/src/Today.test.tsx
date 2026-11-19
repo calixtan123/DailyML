@@ -61,8 +61,49 @@ function practiceApi(
   return { fetch, today }
 }
 
+function practiceWithPendingReview(
+  respond?: (path: string, options?: RequestInit) => Response | Promise<Response>,
+) {
+  let assessed = false
+  const { today, fetch } = practiceApi(undefined, undefined, (path, options) => {
+    if (path === '/api/practice/items/yesterday/submission') {
+      const submission: SavedSubmission = {
+        text: 'An answer from yesterday.', assessed_text: 'An answer from yesterday.', credited: true,
+        completed_date: '2026-11-18', completed_timezone: 'Europe/London', clarification_draft: null,
+        request: {
+          id: 'grading', state: assessed ? 'assessed' : 'in_flight', can_send: false,
+          grade: assessed ? 3 : null, message: null, reference: { sources: {} },
+          feedback: assessed ? {
+            status: 'assessed', summary: 'Understood generalisation.', corrections: [],
+            model_answer: 'Evaluate on unseen data.', reasoning: [], example: '', source_ids: [],
+          } : null,
+        },
+      }
+      return Response.json(submission)
+    }
+    if (respond) return respond(path, options)
+    throw new Error(`Unexpected request ${path}`)
+  })
+  const pending = {
+    ...item('yesterday', 'Generalisation', '', 0, '2026-11-18'),
+    question: today.selections[0].item.question, submitted: true, grading_status: 'in_flight',
+  }
+  today.submitted.push(pending)
+  today.reviews.first = { stage: 0, due_date: null, awaiting_assessment: true }
+  return {
+    today, fetch,
+    assess() {
+      today.reviews.first = { stage: 1, due_date: '2026-11-19', awaiting_assessment: false }
+      today.due_reviews = [{ question_id: 'first', section_id: 'fundamentals', title: 'Generalisation' }]
+      pending.grading_status = 'assessed'
+      assessed = true
+    },
+  }
+}
+
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   window.history.replaceState(null, '', '/')
@@ -128,46 +169,20 @@ describe('Today practice editor', () => {
 
   it('shows a newly due review when grading finishes during a Review sooner request', async () => {
     let respondToReview: (() => void) | undefined
-    let assessed = false
-    const submission = {
-      text: 'An answer from yesterday.', assessed_text: 'An answer from yesterday.', credited: true,
-      completed_date: '2026-11-18', completed_timezone: 'Europe/London', clarification_draft: null,
-    }
-    const { today } = practiceApi(undefined, undefined, path => {
+    const { assess } = practiceWithPendingReview(path => {
       if (path === '/api/practice/reviews/first/sooner') {
         const response = Response.json({ stage: 0, due_date: '2026-11-20', awaiting_assessment: true })
         return new Promise(resolve => { respondToReview = () => resolve(response) })
       }
-      if (path === '/api/practice/items/yesterday/submission') {
-        return Response.json({
-          ...submission,
-          request: {
-            id: 'grading', state: assessed ? 'assessed' : 'in_flight', can_send: false,
-            grade: assessed ? 3 : null, message: null, reference: { sources: {} },
-            feedback: assessed ? {
-              status: 'assessed', summary: 'Understood generalisation.', corrections: [],
-              model_answer: 'Evaluate on unseen data.', reasoning: [], example: '', source_ids: [],
-            } : null,
-          },
-        })
-      }
       throw new Error(`Unexpected request ${path}`)
     })
-    today.submitted.push({
-      ...item('yesterday', 'Generalisation', '', 0, '2026-11-18'),
-      question: today.selections[0].item.question, submitted: true, grading_status: 'in_flight',
-    })
-    today.reviews.first = { stage: 0, due_date: null, awaiting_assessment: true }
     render(<StrictMode><App /></StrictMode>)
     fireEvent.click(await screen.findByRole('button', { name: /Generalisation.*Grading in progress/ }))
     await screen.findByText('Grading in progress', { selector: 'strong' })
 
     fireEvent.click(screen.getByRole('button', { name: 'Review sooner' }))
     await waitFor(() => expect(respondToReview).toBeDefined())
-    today.reviews.first = { stage: 1, due_date: '2026-11-19', awaiting_assessment: false }
-    today.due_reviews = [{ question_id: 'first', section_id: 'fundamentals', title: 'Generalisation' }]
-    today.submitted[0].grading_status = 'assessed'
-    assessed = true
+    assess()
     await screen.findByText('Grade 3 of 3')
     await act(async () => respondToReview?.())
 
@@ -176,6 +191,71 @@ describe('Today practice editor', () => {
     expect(screen.getByRole('button', { name: 'Review Generalisation' })).toBeTruthy()
     expect(screen.getByRole('button', { name: /Generalisation.*Assessed/ }).getAttribute('aria-current')).toBe('true')
   })
+
+  it.each(['fails', 'returns an older snapshot'])(
+    'refreshes newly due reviews when More questions %s after grading finishes', async outcome => {
+      let respondToAddition: (() => void) | undefined
+      const { today, fetch, assess } = practiceWithPendingReview()
+      const base = fetch.getMockImplementation()!
+      fetch.mockImplementation(async (path, options) => {
+        if (path !== '/api/practice/items') return base(path, options)
+        const extra = item('third', 'Model monitoring')
+        const response = outcome === 'fails'
+          ? new Response(null, { status: 503 })
+          : Response.json({
+            today: { ...today, selections: [...today.selections, { item: extra, kind: 'extra' }] },
+            item_id: extra.id, message: null,
+          })
+        if (outcome !== 'fails') today.selections.push({ item: extra, kind: 'extra' })
+        return new Promise(resolve => { respondToAddition = () => resolve(response) })
+      })
+      render(<App />)
+      fireEvent.click(await screen.findByRole('button', { name: /Generalisation.*Grading in progress/ }))
+      await screen.findByText('Grading in progress', { selector: 'strong' })
+
+      fireEvent.click(screen.getByRole('button', { name: 'More questions' }))
+      await waitFor(() => expect(respondToAddition).toBeDefined())
+      assess()
+      await screen.findByText('Grade 3 of 3')
+      await act(async () => respondToAddition?.())
+
+      if (outcome === 'fails') {
+        expect(screen.getByRole('alert').textContent).toBe('Could not open another question. Try again.')
+      } else {
+        expect(screen.getByRole('heading', { name: 'Model monitoring' })).toBeTruthy()
+      }
+      expect(await screen.findByRole('button', { name: 'Review Generalisation' })).toBeTruthy()
+    },
+  )
+
+  it.each(['focus', 'timer'])(
+    'checks pending grading on %s after switching questions and preserves an unsaved draft', async trigger => {
+      vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-11-19T12:00:00Z'))
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+      const { today, fetch, assess } = practiceWithPendingReview()
+      today.selections[0].item = today.submitted.shift()!
+      render(<App />)
+      await screen.findByText('Grading in progress', { selector: 'strong' })
+      fireEvent.click(screen.getByRole('button', { name: 'More questions' }))
+      const draft = await screen.findByRole('textbox', { name: 'Your answer' })
+      fireEvent.change(draft, { target: { value: 'Unsaved answer on the second question.' } })
+      assess()
+      expect(screen.queryByRole('button', { name: 'Review Generalisation' })).toBeNull()
+
+      await act(async () => {
+        if (trigger === 'focus') fireEvent(window, new Event('focus'))
+        else await vi.advanceTimersByTimeAsync(60_000)
+      })
+
+      expect(await screen.findByRole('button', { name: 'Review Generalisation' })).toBeTruthy()
+      expect(screen.getByRole('heading', { name: 'Model monitoring' })).toBeTruthy()
+      expect(draft).toHaveProperty('value', 'Unsaved answer on the second question.')
+      expect(fetch.mock.calls.some(([path]) => path.endsWith('/draft'))).toBe(false)
+      fireEvent.click(screen.getByText('Browse questions'))
+      const question = await screen.findByRole('article', { name: 'Generalisation' })
+      expect(within(question).getByText(/Review due/).textContent).toBe('Review due 2026-11-19')
+    },
+  )
 
   it('opens an actionable due review even when the saved first recommendation is different', async () => {
     const { today, fetch } = practiceApi()

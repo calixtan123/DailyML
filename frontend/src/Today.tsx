@@ -1,5 +1,5 @@
 import { Plus } from 'lucide-react'
-import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
+import { type RefObject, useCallback, useEffect, useEffectEvent, useRef, useState } from 'react'
 import { LocalApiError, type LocalRequest } from './api'
 import { type Draft, type LeaveEditor, savedAlternative, useUnsavedDraftWarning } from './drafts'
 import { PracticeCalendar } from './PracticeCalendar'
@@ -137,6 +137,7 @@ export function Today({ request, active, leaveToday }: {
   const reviewActionKeys = useRef(new Map<string, string>())
   const operation = useRef(false)
   const operationVersion = useRef(0)
+  const refreshAfterOperation = useRef(false)
   const heading = useRef<HTMLHeadingElement>(null)
   const focusQuestion = useRef(false)
   const answer = useRef<HTMLTextAreaElement>(null)
@@ -145,24 +146,41 @@ export function Today({ request, active, leaveToday }: {
   const characterCount = Array.from(editor?.text ?? '').length
   const overLimit = session !== undefined && characterCount > session.answer_limit
 
+  const requestTodayRefresh = useCallback(() => {
+    if (operation.current) {
+      refreshAfterOperation.current = true
+      return
+    }
+    setLoadAttempt(previous => previous + 1)
+  }, [])
+
   const observeGradingStatus = useCallback((itemId: string, status: GradingStatus) => {
     if (lastStatus.current?.itemId !== itemId || lastStatus.current?.status !== status) {
       lastStatus.current = { itemId, status }
-      if (status === 'assessed') setLoadAttempt(previous => previous + 1)
+      if (status === 'assessed') requestTodayRefresh()
     }
     setSession(current => current && updateGradingStatus(current, itemId, status))
     setEditor(current => current && current.item.id === itemId && current.item.grading_status !== status
       ? { ...current, item: { ...current.item, grading_status: status } } : current)
-  }, [])
+  }, [requestTodayRefresh])
+
+  const needsTodayRefresh = useEffectEvent(() => {
+    if (!session || currentLocalDate(session.effective_timezone) !== session.local_date) return true
+    const submitted = [...session.selections.map(({ item }) => item), ...session.submitted]
+    return submitted.some(({ grading_status }) => grading_status === 'queued' || grading_status === 'in_flight')
+  })
 
   useEffect(() => {
     if (!active) return
     const controller = new AbortController()
-    let lastSession: Session | undefined
     let loading = false
 
     async function refresh() {
-      if (loading || operation.current) return
+      if (operation.current) {
+        refreshAfterOperation.current = true
+        return
+      }
+      if (loading) return
       loading = true
       const version = operationVersion.current
       const priorStatus = lastStatus.current
@@ -173,7 +191,6 @@ export function Today({ request, active, leaveToday }: {
         if (observed && observed !== priorStatus) {
           today = updateGradingStatus(today, observed.itemId, observed.status)
         }
-        lastSession = today
         setSession(today)
         setLoadError(false)
         const first = today.selections[0]?.item ?? today.unfinished[0] ?? today.submitted[0]
@@ -184,25 +201,26 @@ export function Today({ request, active, leaveToday }: {
           return item ? { item, text: item.draft.text } : previous
         })
       } catch {
-        if (!controller.signal.aborted) setLoadError(true)
+        if (!controller.signal.aborted && version === operationVersion.current) setLoadError(true)
       } finally {
         loading = false
+        if (!controller.signal.aborted && version !== operationVersion.current) requestTodayRefresh()
       }
     }
 
-    function checkDate() {
-      if (!lastSession || currentLocalDate(lastSession.effective_timezone) !== lastSession.local_date) void refresh()
+    function checkToday() {
+      if (needsTodayRefresh()) void refresh()
     }
 
     void refresh()
-    const timer = window.setInterval(checkDate, DATE_CHECK_MS)
-    window.addEventListener('focus', checkDate)
+    const timer = window.setInterval(checkToday, DATE_CHECK_MS)
+    window.addEventListener('focus', checkToday)
     return () => {
       controller.abort()
       window.clearInterval(timer)
-      window.removeEventListener('focus', checkDate)
+      window.removeEventListener('focus', checkToday)
     }
-  }, [request, active, loadAttempt])
+  }, [request, active, loadAttempt, requestTodayRefresh])
 
   useUnsavedDraftWarning(dirty)
 
@@ -295,6 +313,10 @@ export function Today({ request, active, leaveToday }: {
     } finally {
       operation.current = false
       setBusy(false)
+      if (refreshAfterOperation.current) {
+        refreshAfterOperation.current = false
+        requestTodayRefresh()
+      }
     }
   }
 
@@ -347,10 +369,10 @@ export function Today({ request, active, leaveToday }: {
         setSession(current => current && { ...current, reviews: { ...current.reviews, [conceptId]: review } })
       } catch {
         setReviewError('Could not confirm the earlier review date. Try again.')
+      } finally {
+        requestTodayRefresh()
       }
     })
-    // Grading may finish while this action blocks Today refreshes.
-    retryToday()
   }
 
   function openDueReview(review: DueReview) {
@@ -384,7 +406,7 @@ export function Today({ request, active, leaveToday }: {
 
   function retryToday() {
     setLoadError(false)
-    setLoadAttempt(previous => previous + 1)
+    requestTodayRefresh()
   }
 
   const selections = session?.selections ?? []
