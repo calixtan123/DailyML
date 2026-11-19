@@ -110,6 +110,87 @@ afterEach(() => {
 })
 
 describe('Today practice editor', () => {
+  it('reveals persisted help only after the server acknowledges it and keeps an edited answer on failure', async () => {
+    let resolveHelp: ((response: Response) => void) | undefined
+    const { fetch } = practiceApi(undefined, undefined, (path, options) => {
+      if (path === '/api/practice/items/first/help/hint') {
+        expect(options?.method).toBe('POST')
+        return new Promise(resolve => { resolveHelp = resolve })
+      }
+      if (path === '/api/practice/items/first/help/explanation') return Response.json({ content: 'Stored explanation.' })
+      throw new Error(`Unexpected request ${path}`)
+    })
+    render(<App />)
+    const editor = await screen.findByRole('textbox', { name: 'Your answer' })
+    fireEvent.change(editor, { target: { value: 'Keep this draft while requesting help.' } })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show hint' }))
+    await waitFor(() => expect(resolveHelp).toBeDefined())
+    expect(screen.queryByText('Stored hint.')).toBeNull()
+    await act(async () => resolveHelp?.(Response.json({ content: 'Stored hint.' })))
+    expect(await screen.findByText('Stored hint.')).toBeTruthy()
+    expect(editor).toHaveProperty('value', 'Keep this draft while requesting help.')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show explanation' }))
+    expect(await screen.findByText('Stored explanation.')).toBeTruthy()
+    expect(fetch.mock.calls.filter(([path]) => String(path).includes('/help/'))).toHaveLength(2)
+  })
+
+  it('records an I do not know completion only after the displayed explanation is acknowledged', async () => {
+    const acknowledgementKeys: string[] = []
+    const gapSubmission = {
+      text: "I don't know", assessed_text: "I don't know", assisted: false, credited: true,
+      completed_date: '2026-11-19', completed_timezone: 'Europe/London', clarification_draft: null,
+      request: { id: null, state: 'self_reported_gap', grade: null, can_send: false, message: null, feedback: null, reference: null },
+    }
+    const { today, fetch } = practiceApi(undefined, undefined, (path, options) => {
+      if (path === '/api/practice/items/first/gap/reveal') {
+        expect(options?.method).toBe('POST')
+        return Response.json({ item_id: 'first', explanation: 'Read this reference explanation first.', acknowledgement_required: true })
+      }
+      if (path === '/api/practice/items/first/gap/acknowledge') {
+        acknowledgementKeys.push(JSON.parse(String(options?.body)).idempotency_key)
+        if (acknowledgementKeys.length === 1) return new Response(null, { status: 503 })
+        today.completion_counts[today.local_date] = 1
+        today.selections[0].item = { ...today.selections[0].item, submitted: true, grading_status: 'self_reported_gap' }
+        return Response.json({ submission: gapSubmission, today })
+      }
+      if (path === '/api/practice/items/first/submission') return Response.json(gapSubmission)
+      throw new Error(`Unexpected request ${path}`)
+    })
+    render(<App />)
+    await screen.findByRole('textbox', { name: 'Your answer' })
+    fireEvent.click(screen.getByRole('button', { name: "I don't know" }))
+    expect(await screen.findByText('Read this reference explanation first.')).toBeTruthy()
+    expect(screen.getByText('No practice yet today')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Mark as completed' })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as completed' }))
+    expect(await screen.findByText('Could not record completion yet. The explanation remains available; try again.')).toBeTruthy()
+    expect(screen.getByText('Read this reference explanation first.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Mark as completed' }))
+    expect(await screen.findByText('Self-reported gap')).toBeTruthy()
+    expect(screen.getByText('1 of 2 completed today')).toBeTruthy()
+    expect(screen.queryByText('Grading in progress')).toBeNull()
+    expect(fetch.mock.calls.filter(([path]) => String(path).endsWith('/submit'))).toHaveLength(0)
+    expect(acknowledgementKeys).toEqual([expect.any(String), acknowledgementKeys[0]])
+  })
+
+  it('does not reveal failed help and retains the edited answer', async () => {
+    practiceApi(undefined, undefined, path => {
+      if (path === '/api/practice/items/first/help/hint') return new Response(null, { status: 503 })
+      throw new Error(`Unexpected request ${path}`)
+    })
+    render(<App />)
+    const editor = await screen.findByRole('textbox', { name: 'Your answer' })
+    fireEvent.change(editor, { target: { value: 'Keep this unsaved answer.' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Show hint' }))
+
+    expect(await screen.findByText('Could not save that hint. It has not been shown; try again.')).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Hint' })).toBeNull()
+    expect(editor).toHaveProperty('value', 'Keep this unsaved answer.')
+  })
+
   it('opens the saved draft returned by exact question selection', async () => {
     const saved = item('older', 'Generalisation', 'My previous answer.', 1, '2026-11-18')
     practiceApi(undefined, saved)
@@ -169,20 +250,46 @@ describe('Today practice editor', () => {
 
   it('shows a newly due review when grading finishes during a Review sooner request', async () => {
     let respondToReview: (() => void) | undefined
-    const { assess } = practiceWithPendingReview(path => {
+    let assessed = false
+    const submission = {
+      text: 'An answer from yesterday.', assessed_text: 'An answer from yesterday.', credited: true,
+      completed_date: '2026-11-18', completed_timezone: 'Europe/London', clarification_draft: null,
+    }
+    const { today } = practiceApi(undefined, undefined, path => {
       if (path === '/api/practice/reviews/first/sooner') {
         const response = Response.json({ stage: 0, due_date: '2026-11-20', awaiting_assessment: true })
         return new Promise(resolve => { respondToReview = () => resolve(response) })
       }
+      if (path === '/api/practice/items/yesterday/submission') {
+        return Response.json({
+          ...submission,
+          request: {
+            id: 'grading', state: assessed ? 'assessed' : 'in_flight', can_send: false,
+            grade: assessed ? 3 : null, message: null, reference: { sources: {} },
+            feedback: assessed ? {
+              status: 'assessed', summary: 'Understood generalisation.', corrections: [],
+              model_answer: 'Evaluate on unseen data.', reasoning: [], example: '', source_ids: [],
+            } : null,
+          },
+        })
+      }
       throw new Error(`Unexpected request ${path}`)
     })
+    today.submitted.push({
+      ...item('yesterday', 'Generalisation', '', 0, '2026-11-18'),
+      question: today.selections[0].item.question, submitted: true, grading_status: 'in_flight',
+    })
+    today.reviews.first = { stage: 0, due_date: null, awaiting_assessment: true }
     render(<StrictMode><App /></StrictMode>)
     fireEvent.click(await screen.findByRole('button', { name: /Generalisation.*Grading in progress/ }))
     await screen.findByText('Grading in progress', { selector: 'strong' })
 
     fireEvent.click(screen.getByRole('button', { name: 'Review sooner' }))
     await waitFor(() => expect(respondToReview).toBeDefined())
-    assess()
+    today.reviews.first = { stage: 1, due_date: '2026-11-19', awaiting_assessment: false }
+    today.due_reviews = [{ question_id: 'first', section_id: 'fundamentals', title: 'Generalisation' }]
+    today.submitted[0].grading_status = 'assessed'
+    assessed = true
     await screen.findByText('Grade 3 of 3')
     await act(async () => respondToReview?.())
 
@@ -433,7 +540,7 @@ describe('Today practice editor', () => {
     const { today, fetch } = practiceApi(undefined, undefined, path => {
       if (!path.endsWith('/submission')) throw new Error(`Unexpected request ${path}`)
       return Response.json({
-        text: 'Stored original', assessed_text: 'Stored original', credited: true,
+        text: 'Stored original', assessed_text: 'Stored original', credited: true, assisted: true,
         completed_date: '2026-11-19', completed_timezone: 'Europe/London',
         request: {
           id: 'assessed', state: 'assessed', grade: 3,
@@ -456,6 +563,7 @@ describe('Today practice editor', () => {
     expect(screen.getByLabelText(/Tuesday, 17 November 2026, 0 completed, No practice/)).toBeTruthy()
     expect(screen.getByLabelText(/Friday, 20 November 2026, Future date/)).toBeTruthy()
     expect(screen.getByText('AI-generated feedback')).toBeTruthy()
+    expect(screen.getByText('Assisted practice — help was viewed before this answer was submitted.')).toBeTruthy()
     expect(screen.getByText('State the split.')).toBeTruthy()
     expect(screen.getByRole('link', { name: 'reading', hidden: true })).toHaveProperty('href', 'https://example.org/')
     expect(fetch.mock.calls.filter(([path]) => path.endsWith('/retry') || path.endsWith('/submit'))).toHaveLength(0)
@@ -464,7 +572,7 @@ describe('Today practice editor', () => {
 
 type TestDraft = { text: string; version: number }
 const originalClarifiedAnswer = 'Keep separate data.'
-const clarificationRequest: SavedSubmission['request'] = { id: 'clarification', state: 'needs_clarification',
+const clarificationRequest: Exclude<SavedSubmission['request'], { state: 'self_reported_gap' }> = { id: 'clarification', state: 'needs_clarification',
   feedback: { status: 'needs_clarification', explanation: 'What was held out?' },
   message: null, grade: null, can_send: false, reference: { sources: {} },
 }
@@ -474,7 +582,7 @@ function clarificationApi(
   read?: (result: Response) => Response | Promise<Response>,
 ) {
   let draft: TestDraft | null = { text: originalClarifiedAnswer, version: 0 }
-  let request: SavedSubmission['request'] = clarificationRequest
+  let request: Exclude<SavedSubmission['request'], { state: 'self_reported_gap' }> = clarificationRequest
   let assessedText = originalClarifiedAnswer
   const result = () => Response.json({
     text: originalClarifiedAnswer, assessed_text: assessedText, credited: true,
