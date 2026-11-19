@@ -13,7 +13,7 @@ const item = (id: string, title: string, text = '', version = 0, date = '2026-11
   draft: { text, version },
 })
 
-function practiceApi(save?: (edit: { text: string; version: number }) => Promise<Response>) {
+function practiceApi(save?: (edit: { text: string; version: number }) => Promise<Response>, resumed?: ReturnType<typeof item>) {
   const first = item('first', 'Generalisation')
   const second = item('second', 'Data leakage')
   const third = item('third', 'Model monitoring')
@@ -21,7 +21,7 @@ function practiceApi(save?: (edit: { text: string; version: number }) => Promise
     local_date: '2026-11-19', timezone: 'Europe/Paris', effective_timezone: 'Europe/London',
     goal: 2, answer_limit: 8000, shortage: null,
     selections: [first, second].map(item => ({ item, kind: 'variety' })),
-    unfinished: [],
+    unfinished: resumed ? [resumed] : [],
   }
   const fetch = vi.fn(async (path: string, options?: RequestInit) => {
     if (path === '/api/session') return Response.json({ csrf_token: 'test' })
@@ -29,7 +29,9 @@ function practiceApi(save?: (edit: { text: string; version: number }) => Promise
     if (path === '/api/sections') {
       return Response.json([{ id: 'fundamentals', title: 'Fundamentals', question_count: 2 }])
     }
+    if (path === '/api/questions?section_id=fundamentals') return Response.json([first.question])
     if (path === '/api/practice/items') {
+      if (resumed) return Response.json({ today, item_id: resumed.id, message: null })
       today.selections.push({ item: third, kind: 'extra' })
       return Response.json({ today, item_id: 'third', message: null })
     }
@@ -53,6 +55,19 @@ afterEach(() => {
 })
 
 describe('Today practice editor', () => {
+  it('opens the saved draft returned by exact question selection', async () => {
+    const saved = item('older', 'Generalisation', 'My previous answer.', 1, '2026-11-18')
+    practiceApi(undefined, saved)
+    render(<App />)
+    const editor = await screen.findByRole('textbox', { name: 'Your answer' })
+    expect(editor).toHaveProperty('value', '')
+
+    fireEvent.click(screen.getByText('Browse questions'))
+    fireEvent.click(await screen.findByRole('button', { name: 'Practise this question' }))
+
+    await waitFor(() => expect(editor).toHaveProperty('value', 'My previous answer.'))
+  })
+
   it('waits for SQLite acknowledgement before leaving an edited question', async () => {
     let acknowledge!: (response: Response) => void
     const { fetch } = practiceApi(() => new Promise(resolve => { acknowledge = resolve }))

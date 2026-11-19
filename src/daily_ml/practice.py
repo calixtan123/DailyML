@@ -284,8 +284,12 @@ class Practice:
                 kind: SelectionKind = "focused" if section_id or question_id else "extra"
                 item_id = self._append(connection, day, selected, len(existing) + 1, kind)
                 message = None
+            elif question_id is not None:
+                today_item_id = existing[question_id]
+                item_id = self._unfinished_item_id(connection, question_id, today_item_id) or today_item_id
+                message = None
             else:
-                item_id = self._existing_focused_item(candidates, existing) if section_id or question_id else None
+                item_id = self._existing_focused_item(candidates, existing) if section_id else None
                 message = None if item_id else self._exhausted_message(section_id)
             result = PracticeAddition(self._today(connection, day), item_id, message)
         return result
@@ -435,19 +439,25 @@ class Practice:
         return self._choose([candidate for candidate in eligible if rank(candidate) == best])
 
     @staticmethod
+    def _unfinished_item_id(
+        connection: sqlite3.Connection, question_id: str, preferred_id: str | None = None
+    ) -> str | None:
+        """Find a saved draft, favouring the selected item if it already has work."""
+        row = connection.execute(
+            """SELECT id FROM practice_items
+               WHERE question_id = ? AND trim(draft_text) <> ''
+               ORDER BY (id = ?) DESC, created_at DESC, id LIMIT 1""",
+            (question_id, preferred_id),
+        ).fetchone()
+        return row[0] if row else None
+
+    @staticmethod
     def _append(
         connection: sqlite3.Connection, day: _Day, candidate: _Candidate, slot: int, kind: SelectionKind
     ) -> str:
         """Link an unfinished answer when present or create a new immutable snapshot."""
-        saved = connection.execute(
-            """SELECT id FROM practice_items
-               WHERE question_id = ? AND trim(draft_text) <> ''
-               ORDER BY created_at DESC, id LIMIT 1""",
-            (candidate.question_id,),
-        ).fetchone()
-        if saved:
-            item_id = saved[0]
-        else:
+        item_id = Practice._unfinished_item_id(connection, candidate.question_id)
+        if item_id is None:
             item_id = str(uuid4())
             connection.execute(
                 """INSERT INTO practice_items (

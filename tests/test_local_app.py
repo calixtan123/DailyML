@@ -4,6 +4,8 @@ import re
 import socket
 import subprocess
 import sys
+from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -13,6 +15,7 @@ from fastapi.testclient import TestClient
 from daily_ml.app import create_app
 from daily_ml.cli import LaunchError, bind_loopback, own_data_directory
 from daily_ml.config import load_settings
+from daily_ml.practice import Practice
 
 ORIGIN = "http://127.0.0.1:49152"
 
@@ -323,3 +326,38 @@ def test_practice_routes_require_csrf_and_allow_signed_out_drafts(client):
     assert client.put(
         "/api/practice/items/9d095c57-2a4f-40bd-89ed-5673d8a38fbd/draft", headers=headers, json=draft
     ).status_code == 404
+
+
+def test_exact_practice_route_resumes_a_draft_saved_after_midnight(tmp_path, assets, monkeypatch):
+    """Return the older draft's snapshot while preserving the next day's saved pair."""
+    now = datetime(2026, 11, 16, 23, 59, tzinfo=UTC)
+    practice_factory = partial(Practice, clock=lambda: now, choose=lambda options: options[0])
+    monkeypatch.setattr("daily_ml.app.Practice", practice_factory)
+    settings = load_settings(environ={"DML_DATA_DIR": str(tmp_path)})
+
+    with TestClient(create_app(settings, port=49152, assets_dir=assets), base_url=ORIGIN) as client:
+        headers = bootstrap(client)
+        monday = client.post("/api/practice/today", headers=headers).json()
+        older = monday["selections"][0]["item"]
+        now = datetime(2026, 11, 17, 0, 1, tzinfo=UTC)
+        tuesday = client.post("/api/practice/today", headers=headers).json()
+        newer = tuesday["selections"][0]["item"]
+        assert monday["local_date"] == "2026-11-16"
+        assert tuesday["local_date"] == "2026-11-17"
+        assert older["question"] == newer["question"]
+        assert older["id"] != newer["id"]
+        saved = client.put(
+            f"/api/practice/items/{older['id']}/draft",
+            headers=headers,
+            json={"text": "Keep my earlier answer.", "version": 0},
+        )
+        assert saved.status_code == 200
+
+        reopened = client.post(
+            "/api/practice/items", headers=headers, json={"question_id": older["question"]["id"]}
+        )
+
+    assert reopened.status_code == 200
+    assert reopened.json()["item_id"] == older["id"]
+    assert reopened.json()["today"]["selections"] == tuesday["selections"]
+    assert reopened.json()["today"]["unfinished"] == [{**older, "draft": saved.json()}]

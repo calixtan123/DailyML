@@ -7,6 +7,8 @@ const reference = { question: 'Which split can we fit on?', answer: 'Training on
 
 function stubLocalApi(account: Account = null, submitTest?: (options: RequestInit) => Promise<Response>) {
   let failStatusRead = false
+  let draft = { text: '', version: 0 }
+  let failNextDraftSave = false
   vi.stubGlobal('fetch', async (path: string, options?: RequestInit) => {
     switch (path) {
       case '/api/session':
@@ -16,7 +18,7 @@ function stubLocalApi(account: Account = null, submitTest?: (options: RequestIni
           local_date: '2026-11-19', timezone: 'Europe/London', effective_timezone: 'Europe/London',
           goal: 2, answer_limit: 8000, shortage: null, unfinished: [],
           selections: [{ kind: 'variety', item: {
-            id: 'first', local_date: '2026-11-19', draft: { text: '', version: 0 },
+            id: 'first', local_date: '2026-11-19', draft,
             question: {
               title: 'Generalisation', difficulty: 'introductory', section_title: 'Fundamentals',
               prompt: 'How should we evaluate new rentals?', objective: 'Explain generalisation.',
@@ -24,6 +26,14 @@ function stubLocalApi(account: Account = null, submitTest?: (options: RequestIni
             },
           } }],
         })
+      case '/api/practice/items/first/draft':
+        if (options?.method !== 'PUT') throw new Error('Draft save requires PUT.')
+        if (failNextDraftSave) {
+          failNextDraftSave = false
+          return Response.json({ detail: 'Database unavailable.' }, { status: 503 })
+        }
+        draft = { text: JSON.parse(String(options.body)).text, version: draft.version + 1 }
+        return Response.json(draft)
       case '/api/connection/sign-out':
         if (options?.method !== 'POST') throw new Error('Sign-out requires POST.')
         account = null
@@ -68,6 +78,7 @@ function stubLocalApi(account: Account = null, submitTest?: (options: RequestIni
   return {
     changeAccount: (next: Account) => { account = next },
     failNextStatusRead: () => { failStatusRead = true },
+    failDraftSave: () => { failNextDraftSave = true },
   }
 }
 
@@ -98,6 +109,39 @@ describe('Daily ML Practice', () => {
 
     fireEvent.click(screen.getByRole('link', { name: 'Today' }))
     expect(await screen.findByRole('heading', { name: 'Generalisation' })).toBeTruthy()
+  })
+
+  it.each(['back', 'forward'] as const)('keeps an unsaved edit after browser %s fails to save, then allows retry', async direction => {
+    window.history.replaceState(null, '', '#/settings')
+    const { failDraftSave } = stubLocalApi()
+    render(<App />)
+    fireEvent.click(screen.getByRole('link', { name: 'Today' }))
+    if (direction === 'forward') {
+      await screen.findByRole('textbox', { name: 'Your answer' })
+      fireEvent.click(screen.getByRole('link', { name: 'Settings' }))
+      await screen.findByRole('heading', { name: 'Settings' })
+      window.history.back()
+    }
+    const editor = await screen.findByRole('textbox', { name: 'Your answer' })
+    fireEvent.change(editor, { target: { value: 'Keep this answer across browser navigation.' } })
+    failDraftSave()
+
+    window.history[direction]()
+
+    expect(await screen.findByRole('alert')).toBeTruthy()
+    await waitFor(() => expect(window.location.hash).toBe('#/today'))
+    expect(screen.getByRole('textbox', { name: 'Your answer' })).toHaveProperty('value',
+      'Keep this answer across browser navigation.')
+    expect(screen.getByRole('button', { name: 'Retry save' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Settings' })).toBeNull()
+
+    window.history[direction]()
+
+    await screen.findByRole('heading', { name: 'Settings' })
+    window.history[direction === 'back' ? 'forward' : 'back']()
+    expect(await screen.findByRole('textbox', { name: 'Your answer' })).toHaveProperty('value',
+      'Keep this answer across browser navigation.')
+    expect(screen.getByText('Draft saved.')).toBeTruthy()
   })
 
   it('replaces grading controls for a different account and hides them on sign-out', async () => {

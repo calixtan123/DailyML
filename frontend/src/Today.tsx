@@ -35,7 +35,7 @@ type SaveState =
   | { kind: 'idle' | 'saving' | 'saved' }
   | { kind: 'error'; message: string }
   | { kind: 'conflict'; saved: Draft }
-export type LeaveToday = (next: () => void) => void
+export type LeaveToday = () => Promise<boolean>
 
 const DATE_CHECK_MS = 60_000
 
@@ -188,30 +188,32 @@ export function Today({ request, active, leaveToday }: {
     }
   }
 
-  async function run(action: () => void | Promise<void>) {
+  async function run<T>(action: () => T | Promise<T>): Promise<T | undefined> {
     if (operation.current) return
     operation.current = true
     operationVersion.current += 1
     setBusy(true)
     try {
-      await action()
+      return await action()
     } finally {
       operation.current = false
       setBusy(false)
     }
   }
 
-  async function afterDraftSaved(action: () => void | Promise<void>) {
-    await run(async () => {
-      if (saveState.kind === 'conflict' && dirty) return
-      if (dirty && !await persistDraft()) return
+  async function afterDraftSaved(action?: () => void | Promise<void>): Promise<boolean> {
+    const saved = await run(async () => {
+      if (saveState.kind === 'conflict' && dirty) return false
+      if (dirty && !await persistDraft()) return false
       setActionError('')
-      await action()
+      await action?.()
+      return true
     })
+    return saved ?? false
   }
 
   useEffect(() => {
-    leaveToday.current = (next) => { void afterDraftSaved(next) }
+    leaveToday.current = afterDraftSaved
     return () => { leaveToday.current = null }
   })
 
@@ -222,6 +224,7 @@ export function Today({ request, active, leaveToday }: {
         const result = await request<Addition>('/api/practice/items', jsonOptions('POST', choice))
         setSession(result.today)
         const item = result.today.selections.find(selection => selection.item.id === result.item_id)?.item
+          ?? result.today.unfinished.find(item => item.id === result.item_id)
         if (item) {
           showItem(item)
           setBrowsing(false)

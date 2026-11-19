@@ -2,6 +2,8 @@
 
 DML-4 saves daily recommendations, additional practice items and answer drafts in the local SQLite database. Recommendations preserve the version of the question, rubric and sources presented to the learner. Conditional draft versions protect edits made in multiple tabs. An unfinished draft can be resumed after the learning date changes.
 
+## Initial verification
+
 | Check | Result |
 | --- | --- |
 | `npm --prefix frontend test -- --run` | 30 tests passed. |
@@ -16,4 +18,19 @@ Installed-wheel screenshots were captured at widths of 1440, 1024, 768, 390 and 
 
 Python tests cover deterministic selection, concurrent database connections, immutable snapshots, draft version conflicts and SQLite backup and restore. DML-6 supplies real accepted-attempt due dates to the recommendation selector.
 
-The editable-environment run had 201 passing tests and seven OAuth subprocess import failures. Diagnosis confirmed macOS repeatedly sets `UF_HIDDEN` on the editable `.pth` file; Python ignores hidden `.pth` files, so isolated subprocesses cannot import `daily_ml`. Reinstalling the editable package did not resolve the flag. Built the current wheel with `UV_CACHE_DIR=/private/tmp/dml4-uv-cache uv build --wheel --offline --out-dir /private/tmp/dml4-python-proof`, installed it into the disposable verification environment, and ran the complete suite there successfully. No application code was changed to accommodate this environment issue.
+The editable-environment run had 201 passing tests and seven OAuth subprocess import failures. Diagnosis confirmed macOS repeatedly sets `UF_HIDDEN` on the editable `.pth` file. Python ignores hidden `.pth` files, so isolated subprocesses could not import `daily_ml`. Reinstalling the editable package did not resolve the flag. Building the initial wheel with `UV_CACHE_DIR=/private/tmp/dml4-uv-cache uv build --wheel --offline --out-dir /private/tmp/dml4-python-proof` and installing it in a disposable environment allowed the complete suite to pass.
+
+## Review fix verification
+
+Choosing an exact question reopens its saved overnight draft even when today's pair contains a new item for that question. Back and Forward wait for the draft save when leaving Today for Settings. If the save fails, the browser returns to Today with the edit visible and the history action can be retried.
+
+| Check | Result |
+| --- | --- |
+| `/private/tmp/dml4-history-verify.o2fM5aQ5/venv/bin/python -m pytest -q --tb=short` | 209 passed in 19.73 s against the fresh installed wheel. The new API test saved an older draft after midnight, reopened it and verified that the next day's pair and question snapshots were preserved. |
+| `npm --prefix frontend test -- --run` | 33 tests passed, including opening the overnight draft and retrying Back and Forward after a failed save. |
+| `npm --prefix frontend run typecheck` and `npm --prefix frontend run build` | Both passed. |
+| `/private/tmp/dml4-history-verify.o2fM5aQ5/venv/bin/python scripts/smoke_installed.py /private/tmp/dml4-history-verify.o2fM5aQ5/*.whl /private/tmp/dml4-history-verify.o2fM5aQ5/venv/bin/daily-ml` | Wheel and installed launcher passed. |
+| `DML_E2E_EXECUTABLE=/private/tmp/dml4-history-verify.o2fM5aQ5/venv/bin/daily-ml npm --prefix frontend run test:e2e -- --output=/private/tmp/dml4-history-verify.o2fM5aQ5/browser-results` | One Chromium journey passed in 3.6 s. It verified failed Back recovery, the retry and the answer after reloading. |
+| `DML_E2E_EXECUTABLE=/private/tmp/dml4-history-verify.o2fM5aQ5/venv/bin/daily-ml npm --prefix frontend run test:e2e -- --config=/private/tmp/dml4-history-verify.o2fM5aQ5/playwright.config.ts --output=/private/tmp/dml4-history-verify.o2fM5aQ5/forward-results` | One companion Chromium journey passed in 3.6 s. The temporary spec verified failed Forward recovery, the retry and the answer after reloading. |
+
+Installed checks used temporary local data and simulated sign-in. The sandbox blocked temporary loopback ports, and the full runs passed with approved loopback access. The responsive journey checked overflow at 200% CSS zoom. Native Chrome visual and keyboard verification at 200% browser zoom remains pending because macOS ScreenCaptureKit returned `SCStreamErrorDomain -3812` (invalid parameter) when opening Chrome for inspection.

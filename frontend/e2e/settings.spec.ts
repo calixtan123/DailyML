@@ -109,6 +109,26 @@ test('The installed app saves practice drafts and preserves Settings and sign-in
       await page.reload()
       await expect(editor).toHaveValue('Keep my edit until the save succeeds.')
 
+      await page.getByRole('link', { name: 'Settings', exact: true }).click()
+      await expect(page).toHaveTitle('Settings · Daily ML Practice')
+      await page.getByRole('link', { name: 'Today', exact: true }).click()
+      await editor.fill('Save this answer before moving through browser history.')
+      await page.route(saveRoute, (route) => route.fulfill({
+        status: 503, json: { detail: 'Simulated local save failure.' },
+      }))
+      await page.goBack()
+      await expect(page.getByRole('alert')).toHaveText('Could not save your draft. Your text is still here.')
+      await expect(page).toHaveURL(`${origin}/#/today`)
+      await expect(editor).toHaveValue('Save this answer before moving through browser history.')
+
+      await page.unroute(saveRoute)
+      await page.goBack()
+      await expect(page).toHaveTitle('Settings · Daily ML Practice')
+      await page.goForward()
+      await expect(page).toHaveTitle('Today · Daily ML Practice')
+      await page.reload()
+      await expect(editor).toHaveValue('Save this answer before moving through browser history.')
+
       const compact = page.getByRole('combobox', { name: 'Session question', exact: true })
       for (const width of [1440, 1024, 768, 390, 320]) {
         await page.setViewportSize({ width, height: 900 })
