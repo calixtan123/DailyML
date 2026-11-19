@@ -40,11 +40,24 @@ The fresh whole-branch review also required recovery during a model-catalog outa
 
 ## Live acceptance on the learner's Mac
 
-**Pending.** The recorded checks used simulated provider responses. The learner's actual account model list and a completed grading request still need verification.
+**Confirmed on 19 November 2026.** The learner confirmed successful sign-in, checks and the Settings connection test. The installed app saved the completed live assessment below. Earlier offline checks and pending statements above describe the pre-acceptance state.
 
 1. Launch the app. From **Today**, open **Settings**, then select **Continue with ChatGPT** and complete consent for the intended account and workspace.
 2. Open **Grading model** and choose an entry from the returned list. Record its identifier from the result and observe the starting 24-hour count.
 3. Review the fixed question and answer, then choose **Run connection test** once. Wait for the terminal result. A new outbound attempt increases the local count. Reopening Settings shows the stored result without sending another model request.
 4. Record the date, model identifier, terminal result, prompt version, schema mode, installed SDK and auth versions, and observed counts. If a provider restriction blocks completion, record the displayed recovery message and stage reached. Only the learner can authorize another attempt.
 
-Keep credentials, authorization codes and account identifiers out of the evidence. DML-2 remains open until the live check succeeds.
+Keep credentials, authorization codes and account identifiers out of the evidence. The successful live check below clears this acceptance gate.
+
+
+### Recorded live result, 19 November 2026
+
+The learner initiated the Settings test through the installed launcher using their ChatGPT plan and confirmed it worked. A read-only inspection of the existing SQLite database found one connection-test request, `f467ae5e-f71a-4440-8035-04ebc0ac8848`, created at 15:53:32.094961 UTC and completed at 15:53:40.801436 UTC. It is `assessed`, with stored feedback, grade **3/3**, no error, and latency 8,701 ms. The model is `gpt-6.1-terra`; schema mode is `schema` (strict structured output), reference `connection-leakage-v1`, prompt `rubric-v1`, and schema `feedback-v1`.
+
+Runtime versions from the installed environment: Python 3.12.4, Daily ML Practice 0.1.0 (including its ChatGPT OAuth implementation), OpenAI Python SDK 2.54.0, HTTPX 0.28.1 and PyJWT 2.15.1. The installed wheel contains the application code from reviewed commit `89822b0411fe51d33c1f529163182252149cf81c`.
+
+Verification used `/private/tmp/dml-live-launch-20261119/venv/bin/python` with SQLite URI `mode=ro`: selected the latest assessed connection-test row, parsed `context_json` with `GradingContext.model_validate_json`, and ran `validate_feedback({"feedback": json.loads(row["feedback_json"])}, context)`. Result: **PASS**, both rubric criteria valid, assessed feedback and grade 3 present, no error. The ledger contains **one outbound model attempt**, **zero automatic retries**, and **zero practice requests**. The rolling 24-hour model-attempt count was **1** at inspection. This inspection sent no additional model request.
+
+The earlier sign-in failure came from launching uninstalled source in a development environment: the isolated OAuth helper could not import the package. Building and installing the wheel with locked runtime dependencies restored the helper. The successful test used that installed launcher; no application source change was needed. The model catalog and sign-in are confirmed by the learner's Settings journey, while the completed feedback and attempt count were independently read from saved state.
+
+This proves one real plan-backed connection test. It does not establish future allowance or a successful live practice submission. Practice submission, recovery and calendar behavior retain their independently reviewed offline verification under DML-5.
