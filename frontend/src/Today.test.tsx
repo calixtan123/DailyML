@@ -623,8 +623,8 @@ describe('Clarification draft', () => {
     const text = 'Hold back a separately collected test set.'
     fireEvent.change(editor, { target: { value: text } })
     expect(window.dispatchEvent(new Event('beforeunload', { cancelable: true }))).toBe(false)
-    fireEvent.click(screen.getByRole('button', { name: 'Save draft' }))
-    await screen.findByText('Draft saved.')
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save draft' })) })
+    expect(screen.getByText('Draft saved.')).toBeTruthy()
     expect(window.dispatchEvent(new Event('beforeunload', { cancelable: true }))).toBe(true)
 
     unmount()
