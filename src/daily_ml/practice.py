@@ -1192,52 +1192,29 @@ class Practice:
         ]
         calendar_date = date.fromisoformat(local_date)
         week_start = calendar_date - timedelta(days=calendar_date.weekday())
-        week_start_time = datetime.combine(
-            week_start, datetime.min.time(), tzinfo=ZoneInfo(day.timezone),
-        ).timestamp()
         counts = dict(connection.execute(
             """SELECT local_date, COUNT(*) FROM practice_credits
                WHERE local_date BETWEEN ? AND ? GROUP BY local_date""",
             (week_start.isoformat(), local_date),
         ))
         first_use_date, = connection.execute("SELECT MIN(local_date) FROM practice_days").fetchone()
-        # Preserve pending work and drafts across weeks. Keep one older assessment
-        # on each track per question available for revision or comparison.
+        # Every saved submission can be reopened from Today across practice days.
         submitted = [
             self._item(row)
             for row in connection.execute(
-                """WITH submitted_requests AS (
-                       SELECT item.id, item.question_id, item.local_date, item.section_title,
-                              item.snapshot_json, item.draft_text, item.draft_version, request.state, request.error,
-                              request.id AS request_id, request.created_at AS request_at,
-                              submission.completed_date, revision.item_id IS NOT NULL AS has_revision,
-                              CASE WHEN revision.item_id IS NULL THEN submission.completed_at
-                                   ELSE request.created_at END AS activity_at
-                       FROM practice_submissions AS submission
-                       JOIN practice_items AS item ON item.id = submission.item_id
-                       LEFT JOIN practice_revisions AS revision ON revision.item_id = submission.item_id
-                       JOIN grading_requests AS request
-                         ON request.id = COALESCE(revision.current_request_id, submission.current_request_id)
-                   ),
-                   older_assessments AS (
-                       SELECT id, ROW_NUMBER() OVER (
-                           PARTITION BY question_id, has_revision ORDER BY activity_at DESC, id
-                       ) AS recency
-                       FROM submitted_requests
-                       WHERE state = 'assessed' AND completed_date < :week_start AND request_at < :week_start_time
+                """SELECT item.id, item.local_date, item.section_title, item.snapshot_json,
+                          item.draft_text, item.draft_version, request.state, request.error
+                   FROM practice_submissions AS submission
+                   JOIN practice_items AS item ON item.id = submission.item_id
+                   LEFT JOIN practice_revisions AS revision ON revision.item_id = submission.item_id
+                   JOIN grading_requests AS request
+                     ON request.id = COALESCE(revision.current_request_id, submission.current_request_id)
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM practice_selections WHERE local_date = ? AND item_id = item.id
                    )
-                   SELECT item.id, item.local_date, item.section_title, item.snapshot_json,
-                          item.draft_text, item.draft_version, item.state, item.error
-                   FROM submitted_requests AS item
-                   WHERE (item.completed_date >= :week_start OR item.state <> 'assessed'
-                          OR item.request_at >= :week_start_time
-                          OR EXISTS (SELECT 1 FROM practice_revision_drafts WHERE request_id = item.request_id)
-                          OR item.id IN (SELECT id FROM older_assessments WHERE recency = 1))
-                     AND NOT EXISTS (
-                         SELECT 1 FROM practice_selections WHERE local_date = :local_date AND item_id = item.id
-                     )
-                   ORDER BY item.activity_at DESC, item.id""",
-                {"week_start": week_start.isoformat(), "week_start_time": week_start_time, "local_date": local_date},
+                   ORDER BY CASE WHEN revision.item_id IS NULL THEN submission.completed_at
+                                 ELSE request.created_at END DESC, item.id""",
+                (local_date,),
             )
         ]
         recommended = sum(selection.kind in ("review", "variety") for selection in selections)

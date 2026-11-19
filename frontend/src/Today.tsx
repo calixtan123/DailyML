@@ -462,7 +462,7 @@ export function Today({ request, active, leaveToday }: {
                   {submittedItems.length > 0 && (
                     <optgroup label="Submitted answers">
                       {submittedItems.map(item => <option key={item.id} value={item.id}>
-                        {item.question.title} · {gradingLabel(item)}
+                        {item.question.title} · {item.local_date} · {gradingLabel(item)}
                       </option>)}
                     </optgroup>
                   )}
@@ -506,7 +506,9 @@ export function Today({ request, active, leaveToday }: {
                         <li key={item.id}>
                           <button type="button" disabled={controlsDisabled} onClick={() => selectItem(item)}
                             aria-current={editor?.item.id === item.id ? 'true' : undefined}>
-                            <span>{item.question.title}<span className="session-kind">{gradingLabel(item)}</span></span>
+                            <span>{item.question.title}<span className="session-kind">
+                              {item.local_date} · {gradingLabel(item)}
+                            </span></span>
                           </button>
                         </li>
                       ))}

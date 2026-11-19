@@ -720,10 +720,10 @@ describe('Practice session grading summaries', () => {
     render(<App />)
 
     expect(await screen.findByRole('button', { name: /Generalisation.*Needs clarification/ })).toBeTruthy()
-    expect(screen.getByRole('button', { name: /Model monitoring.*Needs retry/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Model monitoring.*2026-11-18.*Needs retry/ })).toBeTruthy()
     const select = screen.getByRole('combobox', { name: 'Session question' })
     expect(within(select).getByRole('option', { name: /Generalisation.*Needs clarification/ })).toBeTruthy()
-    expect(within(select).getByRole('option', { name: /Model monitoring.*Needs retry/ })).toBeTruthy()
+    expect(within(select).getByRole('option', { name: /Model monitoring.*2026-11-18.*Needs retry/ })).toBeTruthy()
     expect(fetch.mock.calls.some(([path]) => path === '/api/practice/items/previous/submission')).toBe(false)
   })
 })

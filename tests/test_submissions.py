@@ -585,7 +585,7 @@ def test_backfill_legacy_clarification_chain_and_transport_retries(learner, tmp_
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
-def test_today_keeps_one_older_completed_comparison_per_question(learner):
+def test_today_reopens_both_older_completed_comparisons_for_the_same_question(learner):
     client, headers, db, instants = learner
     _configure_model(db)
     client.app.state.grading.provider = provider(lambda request: response_stream(_valid_terminal(request)))
@@ -607,10 +607,12 @@ def test_today_keeps_one_older_completed_comparison_per_question(learner):
     complete_revision(second)
 
     instants[0] = datetime(2026, 4, 20, 12, tzinfo=UTC)
-    submitted = {item["id"] for item in _today(client, headers)["submitted"]}
-    assert submitted & {first["id"], second["id"]} == {second["id"]}
-    older = client.get(f"/api/practice/items/{first['id']}/submission").json()
-    assert older["revision"]["assessed_text"] == "Revised answer."
+    submitted = [item["id"] for item in _today(client, headers)["submitted"]]
+    assert submitted == [second["id"], first["id"]]
+    for item in (first, second):
+        comparison = client.get(f"/api/practice/items/{item['id']}/submission").json()
+        assert comparison["revision"]["assessed_text"] == "Revised answer."
+        assert comparison["revision"]["request"]["state"] == "assessed"
 
 
 def test_supported_original_is_frozen_through_clarification_and_revision(learner):
@@ -653,7 +655,7 @@ def test_supported_original_is_frozen_through_clarification_and_revision(learner
         ]
 
 
-def test_today_bounds_older_assessments_but_keeps_actionable_work(learner):
+def test_today_reopens_each_older_original_with_an_unused_revision(learner):
     client, headers, db, instants = learner
     _configure_model(db)
     calls = []
@@ -678,10 +680,15 @@ def test_today_bounds_older_assessments_but_keeps_actionable_work(learner):
 
     instants[0] = datetime(2026, 4, 20, 12, tzinfo=UTC)
     submitted = {item["id"]: item["grading_status"] for item in _today(client, headers)["submitted"]}
-    assert submitted == {second["id"]: "assessed", pending["id"]: "needs_clarification"}
-
-    base = f"/api/practice/items/{first['id']}"
-    older = client.get(f"{base}/submission").json()
-    edit = {"request_id": older["request"]["id"], "text": "Continue this draft later.", "version": 0}
-    assert client.put(f"{base}/revision-draft", headers=headers, json=edit).status_code == 200
-    assert first["id"] in {item["id"] for item in _today(client, headers)["submitted"]}
+    assert submitted == {
+        first["id"]: "assessed", second["id"]: "assessed", pending["id"]: "needs_clarification",
+    }
+    for item in (first, second):
+        base = f"/api/practice/items/{item['id']}"
+        saved = client.get(f"{base}/submission").json()
+        edit = {"request_id": saved["request"]["id"], "text": "My revised answer.", "version": 0}
+        assert saved["revision_draft"] is not None
+        assert client.post(f"{base}/revise", headers=headers, json=edit).status_code == 202
+    with db.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM practice_credits").fetchone() == (3,)
+        assert connection.execute("SELECT COUNT(*) FROM review_evidence").fetchone() == (2,)

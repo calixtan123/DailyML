@@ -99,7 +99,7 @@ test('Two tabs complete one original after London midnight and reopen an offline
       await page.reload()
       const session = page.getByRole('complementary', { name: 'Today’s session' })
       await expect(session.getByRole('button', { name: title })).toHaveCount(2)
-      const submitted = session.getByRole('button', { name: `${title} Assessed`, exact: true })
+      const submitted = session.getByRole('button', { name: `${title} ${original.local_date} · Assessed`, exact: true })
       await submitted.click()
       await expect(page.getByText('Grade 3 of 3')).toBeVisible()
       await expect(page.getByText('Give a concrete example.')).toBeVisible()
