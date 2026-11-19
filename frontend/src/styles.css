@@ -168,6 +168,9 @@ input { background: var(--input); min-width: 0; width: 180px; }
   line-height: 1.35;
 }
 .today-session-list button[aria-current] { background: #262629; border-color: var(--accent); }
+.today-due-reviews { margin-top: 12px; }
+.today-due-reviews ul { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.today-due-reviews button { width: 100%; text-align: left; }
 .session-order { flex: none; width: 22px; color: var(--accent); text-align: center; }
 .session-kind { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; font-weight: 400; }
 .today-more { width: 100%; margin-top: 12px; justify-content: center; }
@@ -177,6 +180,7 @@ input { background: var(--input); min-width: 0; width: 180px; }
 .today-metadata { margin-bottom: 6px; font-size: 14px; }
 .today-prompt h2 { font-size: 23px; margin-bottom: 10px; }
 .today-objective { margin-top: 12px; color: var(--muted); font-size: 14px; }
+.today-review { margin-top: 12px; font-size: 14px; }
 .today-editor-label, .today-editor-caption { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; }
 .today-editor label { display: inline-block; margin-bottom: 6px; }
 .today-editor textarea {

@@ -11,9 +11,11 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from .bank import SectionNotFound
+from .config import bundled_defaults
 from .database import Database
 from .grading import GradingContext
 from .grading_jobs import enqueue_practice_request, practice_grading_status, public_request
+from .scheduling import NEXT_DAY, ReviewState, due_concepts as scheduled_due_concepts, initialize_reviews, read_reviews
 
 DAILY_GOAL = 2
 SelectionKind = Literal["review", "variety", "extra", "focused"]
@@ -170,6 +172,15 @@ class PracticeSelection:
 
 
 @dataclass(frozen=True)
+class DueReview:
+    """An active question that can start a due concept review."""
+
+    question_id: str
+    section_id: str
+    title: str
+
+
+@dataclass(frozen=True)
 class PracticeToday:
     """Today's saved session, unfinished drafts and effective editing limit."""
 
@@ -184,6 +195,8 @@ class PracticeToday:
     submitted: list[PracticeItem]
     completion_counts: dict[str, int]
     first_use_date: str
+    reviews: dict[str, ReviewState]
+    due_reviews: list[DueReview]
 
 
 @dataclass(frozen=True)
@@ -230,11 +243,6 @@ def _now() -> datetime:
     return datetime.now(utc.utc)
 
 
-def _no_due_concepts(_connection: sqlite3.Connection, _date: str) -> Collection[str]:
-    """Leave real review scheduling to the existing due-concept seam."""
-    return ()
-
-
 class Practice:
     """Persist Today selection and drafts in short, isolated transactions.
 
@@ -250,7 +258,9 @@ class Practice:
         Picks a candidate from a nonempty ranked sequence.
     due_concepts : callable
         Returns eligible due concept IDs using the same SQLite connection and
-        the current ISO local date. The initial implementation has no due dates.
+        the current ISO local date. By default, uses saved review dates.
+    review_intervals : tuple of int or None
+        Effective independent review intervals, or the bundled defaults.
     """
 
     def __init__(
@@ -260,17 +270,20 @@ class Practice:
         answer_limit: int,
         clock: Callable[[], datetime] = _now,
         choose: Callable[[Sequence[_Candidate]], _Candidate] = choice,
-        due_concepts: Callable[[sqlite3.Connection, str], Collection[str]] = _no_due_concepts,
+        due_concepts: Callable[[sqlite3.Connection, str], Collection[str]] = scheduled_due_concepts,
+        review_intervals: tuple[int, ...] | None = None,
     ) -> None:
         self.database = database
         self.answer_limit = answer_limit
         self._clock = clock
         self._choose = choose
         self._due_concepts = due_concepts
+        self.review_intervals = review_intervals if review_intervals is not None else tuple(bundled_defaults()["review_intervals"])
         database.initialize_grading()
         with self.database.connect(immediate=True) as connection:
             for statement in _SCHEMA:
                 connection.execute(statement)
+            initialize_reviews(connection, self.review_intervals)
 
     def today(self, timezone: str) -> PracticeToday:
         """Get today's session, saving the recommendation pair if needed.
@@ -290,6 +303,56 @@ class Practice:
             self._prepare_today(connection, day)
             result = self._today(connection, day)
         return result
+
+    def review_sooner(self, concept_id: str, idempotency_key: str, timezone: str) -> ReviewState:
+        """Save an earlier review request and return the effective date.
+
+        Parameters
+        ----------
+        concept_id : str
+            Stable concept from the question bank or saved practice.
+        idempotency_key : str
+            The browser action ID. A retry keeps the original requested date.
+        timezone : str
+            Effective timezone when making the request.
+
+        Returns
+        -------
+        ReviewState
+            Current scheduling state for the requested concept.
+
+        Raises
+        ------
+        PracticeItemNotFound
+            The concept has no active question or saved review.
+        SubmissionConflict
+            The action ID already belongs to another concept.
+        """
+        day = self._day(timezone)
+        with self.database.connect(immediate=True) as connection:
+            reviews = read_reviews(connection)
+            if concept_id not in reviews and not connection.execute(
+                """SELECT 1 FROM bank_active_questions WHERE concept_id = ?
+                   UNION ALL SELECT 1 FROM practice_items
+                   WHERE json_extract(snapshot_json, '$.concept_id') = ? LIMIT 1""",
+                (concept_id, concept_id),
+            ).fetchone():
+                raise PracticeItemNotFound(concept_id)
+            existing = connection.execute(
+                "SELECT concept_id FROM review_sooner_requests WHERE idempotency_key = ?", (idempotency_key,),
+            ).fetchone()
+            state = reviews.get(concept_id, ReviewState())
+            if existing is not None:
+                if existing[0] != concept_id:
+                    raise SubmissionConflict("This review request already belongs to a different concept.")
+                return state
+            tomorrow = date.fromisoformat(day.local_date) + NEXT_DAY
+            due_date = min(tomorrow, state.due_date) if state.due_date else tomorrow
+            connection.execute(
+                "INSERT INTO review_sooner_requests VALUES (?, ?, ?, ?)",
+                (idempotency_key, concept_id, day.timestamp, due_date.isoformat()),
+            )
+            return ReviewState(state.stage, due_date, state.awaiting_assessment)
 
     def add_item(
         self,
@@ -938,9 +1001,20 @@ class Practice:
         shortage = None
         if recommended < DAILY_GOAL:
             shortage = f"Only {recommended} distinct recommendations were available. Your daily goal is {DAILY_GOAL}."
+        reviews = read_reviews(connection)
+        due = {
+            concept_id for concept_id, review in reviews.items()
+            if review.due_date is not None and review.due_date <= calendar_date
+        }
+        due_reviews: dict[str, DueReview] = {}
+        for candidate in self._candidates(connection) if due else ():
+            if candidate.concept_id in due and candidate.concept_id not in due_reviews:
+                due_reviews[candidate.concept_id] = DueReview(
+                    candidate.question_id, candidate.section_id, json.loads(candidate.snapshot_json)["title"],
+                )
         return PracticeToday(
             local_date, original_timezone, day.timezone, DAILY_GOAL, self.answer_limit, shortage, selections, unfinished,
-            submitted, counts, first_use_date,
+            submitted, counts, first_use_date, reviews, list(due_reviews.values()),
         )
 
     @staticmethod

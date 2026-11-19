@@ -283,6 +283,8 @@ class QuestionPrompt:
         Public learning objective.
     difficulty : str
         Difficulty label.
+    concept_id : str
+        Stable primary concept for displaying its review schedule.
     """
 
     id: str
@@ -291,6 +293,7 @@ class QuestionPrompt:
     prompt: str
     objective: str
     difficulty: _DIFFICULTY
+    concept_id: str
 
 
 def _require_unique(ids, label: str) -> None:
@@ -566,7 +569,7 @@ def list_questions(database: Database, section_id: str) -> list[QuestionPrompt]:
                       json_extract(record_json, '$.title'),
                       json_extract(record_json, '$.prompt'),
                       json_extract(record_json, '$.objective'),
-                      json_extract(record_json, '$.difficulty')
+                      json_extract(record_json, '$.difficulty'), concept_id
                FROM bank_active_questions
                WHERE section_id = ? ORDER BY question_id""",
             (section_id,),

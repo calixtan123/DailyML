@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App'
 import type { SavedSubmission } from './PracticeFeedback'
@@ -32,6 +33,8 @@ function practiceApi(
     submitted: [] as ReturnType<typeof item>[],
     completion_counts: {} as Record<string, number>,
     first_use_date: '2026-11-19',
+    reviews: {} as Record<string, { stage: number; due_date: string | null; awaiting_assessment: boolean }>,
+    due_reviews: [] as { question_id: string; section_id: string; title: string }[],
   }
   const fetch = vi.fn(async (path: string, options?: RequestInit) => {
     if (path === '/api/session') return Response.json({ csrf_token: 'test' })
@@ -77,6 +80,130 @@ describe('Today practice editor', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Practise this question' }))
 
     await waitFor(() => expect(editor).toHaveProperty('value', 'My previous answer.'))
+  })
+
+  it('shows a scheduled date and saves a Review sooner request from Today', async () => {
+    const { today } = practiceApi(undefined, undefined, (path, options) => {
+      expect(path).toBe('/api/practice/reviews/first/sooner')
+      expect(options?.method).toBe('POST')
+      expect(JSON.parse(String(options?.body)).idempotency_key).toEqual(expect.any(String))
+      today.reviews.first = { stage: 2, due_date: '2026-11-20', awaiting_assessment: false }
+      return Response.json(today.reviews.first)
+    })
+    today.reviews.first = { stage: 2, due_date: '2026-11-24', awaiting_assessment: false }
+    render(<App />)
+    const editor = await screen.findByRole('textbox', { name: 'Your answer' })
+    expect(screen.getByText('2026-11-24', { selector: 'time' }).getAttribute('datetime')).toBe('2026-11-24')
+
+    fireEvent.change(editor, { target: { value: 'My unsaved draft stays here.' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Review sooner' }))
+
+    expect((await screen.findByText('2026-11-20', { selector: 'time' })).getAttribute('datetime')).toBe('2026-11-20')
+    expect(editor).toHaveProperty('value', 'My unsaved draft stays here.')
+  })
+
+  it('schedules tomorrow for a submitted concept without a date and retries the same request', async () => {
+    const actionKeys: string[] = []
+    const { today } = practiceApi(undefined, undefined, (path, options) => {
+      if (path === '/api/practice/items/first/submission') return new Response(null, { status: 503 })
+      expect(path).toBe('/api/practice/reviews/first/sooner')
+      actionKeys.push(JSON.parse(String(options?.body)).idempotency_key)
+      if (actionKeys.length === 1) return new Response(null, { status: 503 })
+      today.reviews.first = { stage: 0, due_date: '2026-11-20', awaiting_assessment: true }
+      return Response.json(today.reviews.first)
+    })
+    today.selections[0].item.submitted = true
+    today.reviews.first = { stage: 0, due_date: null, awaiting_assessment: true }
+    render(<App />)
+
+    expect(await screen.findByText('Awaiting accepted assessment')).toBeTruthy()
+    const sooner = screen.getByRole('button', { name: 'Review sooner' })
+    fireEvent.click(sooner)
+    await screen.findByText('Could not confirm the earlier review date. Try again.')
+    fireEvent.click(sooner)
+
+    expect(await screen.findByText('2026-11-20', { selector: 'time' })).toBeTruthy()
+    expect(actionKeys).toEqual([expect.any(String), actionKeys[0]])
+  })
+
+  it('shows a newly due review when grading finishes during a Review sooner request', async () => {
+    let respondToReview: (() => void) | undefined
+    let assessed = false
+    const submission = {
+      text: 'An answer from yesterday.', assessed_text: 'An answer from yesterday.', credited: true,
+      completed_date: '2026-11-18', completed_timezone: 'Europe/London', clarification_draft: null,
+    }
+    const { today } = practiceApi(undefined, undefined, path => {
+      if (path === '/api/practice/reviews/first/sooner') {
+        const response = Response.json({ stage: 0, due_date: '2026-11-20', awaiting_assessment: true })
+        return new Promise(resolve => { respondToReview = () => resolve(response) })
+      }
+      if (path === '/api/practice/items/yesterday/submission') {
+        return Response.json({
+          ...submission,
+          request: {
+            id: 'grading', state: assessed ? 'assessed' : 'in_flight', can_send: false,
+            grade: assessed ? 3 : null, message: null, reference: { sources: {} },
+            feedback: assessed ? {
+              status: 'assessed', summary: 'Understood generalisation.', corrections: [],
+              model_answer: 'Evaluate on unseen data.', reasoning: [], example: '', source_ids: [],
+            } : null,
+          },
+        })
+      }
+      throw new Error(`Unexpected request ${path}`)
+    })
+    today.submitted.push({
+      ...item('yesterday', 'Generalisation', '', 0, '2026-11-18'),
+      question: today.selections[0].item.question, submitted: true, grading_status: 'in_flight',
+    })
+    today.reviews.first = { stage: 0, due_date: null, awaiting_assessment: true }
+    render(<StrictMode><App /></StrictMode>)
+    fireEvent.click(await screen.findByRole('button', { name: /Generalisation.*Grading in progress/ }))
+    await screen.findByText('Grading in progress', { selector: 'strong' })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review sooner' }))
+    await waitFor(() => expect(respondToReview).toBeDefined())
+    today.reviews.first = { stage: 1, due_date: '2026-11-19', awaiting_assessment: false }
+    today.due_reviews = [{ question_id: 'first', section_id: 'fundamentals', title: 'Generalisation' }]
+    today.submitted[0].grading_status = 'assessed'
+    assessed = true
+    await screen.findByText('Grade 3 of 3')
+    await act(async () => respondToReview?.())
+
+    const question = screen.getByRole('article', { name: 'Generalisation' })
+    expect((await within(question).findByText(/Review due/)).textContent).toBe('Review due 2026-11-19')
+    expect(screen.getByRole('button', { name: 'Review Generalisation' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Generalisation.*Assessed/ }).getAttribute('aria-current')).toBe('true')
+  })
+
+  it('opens an actionable due review even when the saved first recommendation is different', async () => {
+    const { today, fetch } = practiceApi()
+    today.reviews.third = { stage: 2, due_date: '2026-11-18', awaiting_assessment: false }
+    today.due_reviews = [{ question_id: 'third', section_id: 'fundamentals', title: 'Model monitoring' }]
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Generalisation' })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review Model monitoring' }))
+
+    await screen.findByRole('heading', { name: 'Model monitoring' })
+    expect(fetch.mock.calls.filter(([path]) => path === '/api/practice/items')).toHaveLength(1)
+    expect(JSON.parse(String(fetch.mock.calls.find(([path]) => path === '/api/practice/items')?.[1]?.body)))
+      .toEqual({ section_id: 'fundamentals', question_id: 'third' })
+    expect(screen.getByRole('button', { name: /Generalisation.*Recommendation/ })).toBeTruthy()
+  })
+
+  it('shows a due review date when browsing a section', async () => {
+    const { today } = practiceApi()
+    today.reviews.first = { stage: 1, due_date: '2026-11-18', awaiting_assessment: false }
+    render(<App />)
+    await screen.findByRole('textbox', { name: 'Your answer' })
+    fireEvent.click(screen.getByText('Browse questions'))
+
+    await screen.findByRole('button', { name: 'Practise this question' })
+    const question = screen.getByRole('button', { name: 'Practise this question' }).closest('article')!
+    expect(within(question).getByText('2026-11-18', { selector: 'time' })).toBeTruthy()
+    expect(within(question).getByText(/Review due/)).toBeTruthy()
   })
 
   it('waits for SQLite acknowledgement before leaving an edited question', async () => {
