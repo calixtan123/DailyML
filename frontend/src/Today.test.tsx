@@ -332,6 +332,43 @@ describe('Clarification draft', () => {
     expect(await screen.findByRole('textbox', { name: 'Clarified answer' })).toHaveProperty('value', text)
   })
 
+  it('keeps clarification read-only until More questions finishes and unlocks it after a failed request', async () => {
+    let respond: ((response: Response) => void) | undefined
+    const { fetch } = clarificationApi()
+    const practiceRequest = fetch.getMockImplementation()!
+    fetch.mockImplementation((path, options) => {
+      if (path !== '/api/practice/items') return practiceRequest(path, options)
+      return new Promise(resolve => { respond = resolve })
+    })
+    render(<App />)
+    const editor = await screen.findByRole('textbox', { name: 'Clarified answer' })
+    const text = 'Hold out data for the final evaluation.'
+    fireEvent.change(editor, { target: { value: text } })
+    fireEvent.click(screen.getByRole('button', { name: 'More questions' }))
+    await screen.findByText('Draft saved.')
+
+    expect(respond).toBeDefined()
+    expect(editor).toHaveProperty('readOnly', true)
+    expect(screen.getByRole('button', { name: 'Send clarified answer' })).toHaveProperty('disabled', true)
+    fireEvent.change(editor, { target: { value: 'A late input event should be ignored.' } })
+    expect(editor).toHaveProperty('value', text)
+    await act(async () => respond?.(Response.json({ detail: 'Database unavailable.' }, { status: 503 })))
+    await screen.findByText('Could not open another question. Try again.')
+    expect(editor).toHaveProperty('readOnly', false)
+    expect(editor).toHaveProperty('value', text)
+
+    const revised = 'Keep a separate test set until model selection is finished.'
+    fireEvent.change(editor, { target: { value: revised } })
+    respond = undefined
+    fireEvent.click(screen.getByRole('button', { name: 'More questions' }))
+    await waitFor(() => expect(respond).toBeDefined())
+    expect(editor).toHaveProperty('readOnly', true)
+    await act(async () => respond?.(await practiceRequest('/api/practice/items')))
+    await screen.findByRole('heading', { name: 'Model monitoring' })
+    fireEvent.click(screen.getByRole('button', { name: /Generalisation/ }))
+    expect(await screen.findByRole('textbox', { name: 'Clarified answer' })).toHaveProperty('value', revised)
+  })
+
   it('keeps a clarification and focus on the failed save when leaving Today', async () => {
     let failures = true
     clarificationApi(edit => failures
@@ -379,6 +416,56 @@ describe('Clarification draft', () => {
     await act(async () => { pendingRead?.() })
 
     expect(editor).toHaveProperty('value', text)
+  })
+
+  it('keeps unsaved text available to copy when a reopened status read shows another tab sent the clarification', async () => {
+    let finishReopen: (() => void) | undefined
+    let reads = 0
+    clarificationApi(undefined, async result => {
+      reads += 1
+      if (reads === 1) return result
+      const saved: SavedSubmission = await result.json()
+      const continued = Response.json({
+        ...saved,
+        assessed_text: 'The other tab sent this clarification.',
+        request: { ...saved.request, id: 'continued', state: 'in_flight', feedback: null },
+        clarification_draft: null,
+      })
+      if (reads > 2) return continued
+      return new Promise(resolve => { finishReopen = () => resolve(continued) })
+    })
+    render(<App />)
+    await screen.findByRole('textbox', { name: 'Clarified answer' })
+    fireEvent.click(screen.getByRole('link', { name: 'Settings' }))
+    await screen.findByRole('heading', { name: 'Settings' })
+    fireEvent.click(screen.getByRole('link', { name: 'Today' }))
+    await waitFor(() => expect(finishReopen).toBeDefined())
+    const text = 'Keep this exact unsaved clarification from this tab.'
+    fireEvent.change(screen.getByRole('textbox', { name: 'Clarified answer' }), { target: { value: text } })
+    await act(async () => finishReopen?.())
+
+    const editor = screen.getByRole('textbox', { name: 'Clarified answer' })
+    expect(editor).toHaveProperty('value', text)
+    expect(editor).toHaveProperty('readOnly', true)
+    expect(document.activeElement).toBe(screen.getByRole('alert'))
+    expect(window.dispatchEvent(new Event('beforeunload', { cancelable: true }))).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Copy my answer' }))
+    await screen.findByText(/Your answer is selected/)
+    expect(editor).toHaveProperty('selectionStart', 0)
+    expect(editor).toHaveProperty('selectionEnd', text.length)
+
+    const otherQuestion = screen.getByRole('button', { name: /Data leakage/ })
+    await act(async () => { fireEvent.click(otherQuestion) })
+    expect(screen.getByRole('heading', { name: 'Generalisation' })).toBeTruthy()
+    expect(editor).toHaveProperty('value', text)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Discard edit and refresh grading status' }))
+    await screen.findByRole('button', { name: /Generalisation.*Grading in progress/ })
+    expect(screen.queryByRole('textbox', { name: 'Clarified answer' })).toBeNull()
+    expect(screen.getByText('The other tab sent this clarification.')).toBeTruthy()
+    expect(window.dispatchEvent(new Event('beforeunload', { cancelable: true }))).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: /Data leakage/ }))
+    await screen.findByRole('heading', { name: 'Data leakage' })
   })
 
   it('saves the latest clarification before sending it and updates the selected grading label', async () => {

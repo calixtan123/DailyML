@@ -46,3 +46,16 @@ An original answer can be stored and credited against an imported question snaps
 | `DML_E2E_EXECUTABLE=/private/tmp/dml45-final.69bO01/venv/bin/daily-ml npm --prefix frontend run test:e2e -- --output=/private/tmp/dml45-final.69bO01/browser-results` | Two offline Chromium journeys passed in 5.1 s, exit 0, including two tabs submitting across London midnight and reopening saved feedback. |
 
 Grading was simulated. Live ChatGPT-plan grading remains pending under DML-2. Clarification interactions were verified in frontend tests. The Chromium journeys covered installed submission and navigation behavior.
+
+## Clarification draft race follow-up
+
+When opening another question, Today keeps the clarification read-only until the question request finishes. A failed request restores editing to the saved draft. If a status refresh shows another tab sent the clarification while this tab has unsaved text, Today keeps the local text read-only and available to copy. The learner can then discard that edit to show the latest grading state.
+
+| Command | Result |
+| --- | --- |
+| `npm --prefix frontend test -- --run src/Today.test.tsx -t 'keeps clarification read-only\|keeps unsaved text available' --reporter=dot` | Both tests reproduced the reported races before the fix, exit 1. Both passed afterward, exit 0. |
+| `npm --prefix frontend test -- --run` | 46 passed across five files, exit 0. |
+| `npm --prefix frontend run typecheck` | Exit 0. |
+| `npm --prefix frontend run build` | Exit 0. |
+
+The race tests ran the Today and Settings interface with controlled local API responses. Live grading remains pending under DML-2.

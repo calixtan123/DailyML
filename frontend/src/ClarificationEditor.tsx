@@ -8,9 +8,15 @@ type SaveState =
   | { kind: 'conflict'; saved: Draft }
   | { kind: 'closed' }
 
+export type ClarificationEdit = { text: string; base: Draft }
+
 type Props = {
   draft: Draft
+  edit: ClarificationEdit | undefined
+  closedByRefresh: boolean
+  onEdit: (edit: ClarificationEdit | undefined) => void
   answerLimit: number
+  navigationPending: boolean
   leaveEditor: RefObject<LeaveEditor | null>
   save: (edit: Draft) => Promise<Draft>
   onSaved: (draft: Draft) => void
@@ -19,8 +25,9 @@ type Props = {
 }
 
 /** Keep a clarification editable until its local save or grading action is confirmed. */
-export function ClarificationEditor({ draft, answerLimit, leaveEditor, save, onSaved, send, refresh }: Props) {
-  const [edit, setEdit] = useState<{ text: string; base: Draft }>()
+export function ClarificationEditor({
+  draft, edit, closedByRefresh, onEdit, answerLimit, leaveEditor, navigationPending, save, onSaved, send, refresh,
+}: Props) {
   const [saveState, setSaveState] = useState<SaveState>({ kind: 'idle' })
   const [sendError, setSendError] = useState('')
   const [copyStatus, setCopyStatus] = useState('')
@@ -32,17 +39,18 @@ export function ClarificationEditor({ draft, answerLimit, leaveEditor, save, onS
   const dirty = edit !== undefined && text !== edit.base.text
   const count = Array.from(text).length
   const overLimit = count > answerLimit
-  const blocked = saveState.kind === 'conflict' || saveState.kind === 'closed'
+  const closed = closedByRefresh || saveState.kind === 'closed'
+  const blocked = saveState.kind === 'conflict' || closed
+  const actionPending = busy || navigationPending
 
   useUnsavedDraftWarning(dirty)
 
   useEffect(() => {
     if (blocked || saveState.kind === 'error' || sendError) problem.current?.focus()
-  }, [blocked, saveState, sendError])
+  }, [blocked, closed, saveState, sendError])
 
   function acknowledge(saved: Draft, showSaved: boolean) {
     onSaved(saved)
-    setEdit(undefined)
     setCopyStatus('')
     setSaveState({ kind: showSaved ? 'saved' : 'idle' })
   }
@@ -128,23 +136,27 @@ export function ClarificationEditor({ draft, answerLimit, leaveEditor, save, onS
   return (
     <>
       <label htmlFor="clarified-answer">Clarified answer</label>
-      <textarea id="clarified-answer" ref={input} rows={6} value={text} readOnly={busy} spellCheck={false}
-        aria-describedby="clarification-help clarification-limit" aria-invalid={overLimit || undefined}
+      <textarea id="clarified-answer" ref={input} rows={6} value={text} readOnly={actionPending || closed} spellCheck={false}
+        aria-describedby={`${closed ? 'clarification-closed' : 'clarification-help'} clarification-limit`}
+        aria-invalid={overLimit || undefined}
         onChange={event => {
-          setEdit({ text: event.target.value, base: edit?.base ?? draft })
+          if (actionPending || closed) return
+          onEdit({ text: event.target.value, base: edit?.base ?? draft })
           setCopyStatus('')
           if (saveState.kind === 'saved') setSaveState({ kind: 'idle' })
         }} />
       <div className="today-editor-caption">
-        <p id="clarification-help">Save your draft here or switch questions to save it. Send when you’re ready for grading.</p>
+        {!closed && <p id="clarification-help">
+          Save your draft here or switch questions to save it. Send when you’re ready for grading.
+        </p>}
         <p id="clarification-limit" className={overLimit ? 'error' : undefined} aria-live={overLimit ? 'polite' : 'off'}>
           {count.toLocaleString('en-GB')} / {answerLimit.toLocaleString('en-GB')} characters
         </p>
       </div>
       <div className="actions today-draft-actions">
-        <button className="primary" type="button" disabled={busy || blocked || overLimit || !text.trim()}
+        <button className="primary" type="button" disabled={actionPending || blocked || overLimit || !text.trim()}
           onClick={() => void run(sendAnswer)}>Send clarified answer</button>
-        <button type="button" disabled={busy || blocked || overLimit || !dirty} onClick={() => void run(persist)}>
+        <button type="button" disabled={actionPending || blocked || overLimit || !dirty} onClick={() => void run(persist)}>
           {saveState.kind === 'error' ? 'Retry save' : 'Save draft'}
         </button>
         <p role="status" className="today-save-status">
@@ -153,14 +165,14 @@ export function ClarificationEditor({ draft, answerLimit, leaveEditor, save, onS
           {saveState.kind === 'idle' && (dirty ? 'Unsaved changes' : draft.version > 0 && 'Saved draft loaded.')}
         </p>
       </div>
-      {saveState.kind === 'error' && <p className="error" role="alert" tabIndex={-1} ref={problem}>{saveState.message}</p>}
-      {sendError && (
+      {!closed && saveState.kind === 'error' && <p className="error" role="alert" tabIndex={-1} ref={problem}>{saveState.message}</p>}
+      {!closed && sendError && (
         <div className="actions">
           <p className="error" role="alert" tabIndex={-1} ref={problem}>{sendError}</p>
-          <button type="button" disabled={busy || dirty} onClick={refresh}>Refresh grading status</button>
+          <button type="button" disabled={actionPending || dirty} onClick={refresh}>Refresh grading status</button>
         </div>
       )}
-      {saveState.kind === 'conflict' && (
+      {!closed && saveState.kind === 'conflict' && (
         <div className="today-conflict">
           <p role="alert" tabIndex={-1} ref={problem}>
             This draft changed in another tab. Review both versions before choosing which to keep.
@@ -168,19 +180,19 @@ export function ClarificationEditor({ draft, answerLimit, leaveEditor, save, onS
           <label htmlFor="saved-clarification">Saved in another tab</label>
           <textarea id="saved-clarification" readOnly rows={4} value={saveState.saved.text} />
           <div className="actions">
-            <button type="button" disabled={busy} onClick={() => acknowledge(saveState.saved, false)}>Use saved version</button>
-            <button type="button" disabled={busy || overLimit}
+            <button type="button" disabled={actionPending} onClick={() => acknowledge(saveState.saved, false)}>Use saved version</button>
+            <button type="button" disabled={actionPending || overLimit}
               onClick={() => void run(() => persist(saveState.saved.version))}>Save my version</button>
           </div>
         </div>
       )}
-      {saveState.kind === 'closed' && (
+      {closed && (
         <div className="today-conflict">
-          <p role="alert" tabIndex={-1} ref={problem}>
+          <p id="clarification-closed" role="alert" tabIndex={-1} ref={problem}>
             This clarification is closed. Copy your text if you want to keep it.
           </p>
-          <button type="button" onClick={() => {
-            setEdit(undefined)
+          <button type="button" disabled={actionPending} onClick={() => {
+            onEdit(undefined)
             setSaveState({ kind: 'idle' })
             refresh()
           }}>Discard edit and refresh grading status</button>

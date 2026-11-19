@@ -1,6 +1,6 @@
 import { type RefObject, useEffect, useRef, useState } from 'react'
 import { LocalApiError, type LocalRequest } from './api'
-import { ClarificationEditor } from './ClarificationEditor'
+import { ClarificationEditor, type ClarificationEdit } from './ClarificationEditor'
 import type { Draft, LeaveEditor } from './drafts'
 
 type Feedback = {
@@ -45,6 +45,12 @@ export type SavedSubmission = {
   clarification_draft: Draft | null
 }
 
+type FeedbackView = {
+  submission?: SavedSubmission
+  edit?: ClarificationEdit
+  replacement?: SavedSubmission
+}
+
 const POLL_MS = 500
 const RECOVERABLE = new Set<GradingRequest['state']>([
   'awaiting_access', 'awaiting_allowance', 'outcome_unknown', 'failed_recoverable',
@@ -84,16 +90,17 @@ function Assessment({ job, feedback }: { job: GradingRequest; feedback: Extract<
 }
 
 /** Read saved feedback and poll only while the displayed request is active. */
-export function PracticeFeedback({ itemId, request, active, initial, answerLimit, leaveEditor, onStatus }: {
+export function PracticeFeedback({ itemId, request, active, initial, answerLimit, navigationPending, leaveEditor, onStatus }: {
   itemId: string
   request: LocalRequest
   active: boolean
   initial?: SavedSubmission
   answerLimit: number
+  navigationPending: boolean
   leaveEditor: RefObject<LeaveEditor | null>
   onStatus: (itemId: string, status: GradingStatus) => void
 }) {
-  const [submission, setSubmission] = useState(initial)
+  const [{ submission, edit, replacement }, setView] = useState<FeedbackView>({ submission: initial })
   const [reload, setReload] = useState(0)
   const [readError, setReadError] = useState(false)
   const [actionError, setActionError] = useState('')
@@ -115,13 +122,20 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
         const saved = await request<SavedSubmission | null>(`${base}/submission`, { signal: controller.signal })
         if (controller.signal.aborted || version !== actionVersion.current) return
         if (!saved) throw new Error('Submitted answer unavailable')
-        setSubmission(previous => {
-          const draft = previous?.clarification_draft
-          if (previous?.request.id === saved.request.id && draft && saved.clarification_draft
-              && draft.version > saved.clarification_draft.version) {
-            return { ...saved, clarification_draft: draft }
+        setView(previous => {
+          const draft = previous.submission?.clarification_draft
+          const incomingDraft = saved.clarification_draft
+          const sameClarification = previous.submission?.request.id === saved.request.id
+            && saved.request.feedback?.status === 'needs_clarification' && incomingDraft !== null
+          const dirty = previous.edit && previous.edit.text !== previous.edit.base.text
+          // Keep the old editor available to copy until the learner discards the local text.
+          if (previous.replacement || (!sameClarification && dirty)) {
+            return { ...previous, replacement: saved }
           }
-          return saved
+          if (sameClarification && draft && draft.version > incomingDraft.version) {
+            return { ...previous, submission: { ...saved, clarification_draft: draft } }
+          }
+          return { submission: saved, edit: sameClarification ? previous.edit : undefined }
         })
         onStatus(itemId, saved.request.can_send ? 'ready_to_send' : saved.request.state)
         setReadError(false)
@@ -141,6 +155,7 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
 
   function refresh() {
     setActionError('')
+    setView(previous => previous.replacement ? { submission: previous.replacement } : previous)
     setReload(value => value + 1)
   }
 
@@ -157,7 +172,7 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
         body: JSON.stringify({ request_id: job.id, ...edit, idempotency_key: crypto.randomUUID() }),
       })
       if (controller.signal.aborted) return
-      setSubmission(saved)
+      setView({ submission: saved })
       onStatus(itemId, saved.request.can_send ? 'ready_to_send' : saved.request.state)
       refresh()
     } catch (error) {
@@ -179,7 +194,7 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
       {(readError || actionError) && (
         <div className="actions">
           <p role="alert" className="error">{actionError || 'Could not refresh grading status.'}</p>
-          <button type="button" disabled={busy} onClick={() => void (async () => {
+          <button type="button" disabled={busy || navigationPending} onClick={() => void (async () => {
             if (!leaveEditor.current || await leaveEditor.current()) refresh()
           })()}>Refresh grading status</button>
         </div>
@@ -208,12 +223,17 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
                   <p className="muted">AI-generated feedback</p>
                   <p>{job.feedback.explanation}</p>
                   <ClarificationEditor key={job.id} draft={submission.clarification_draft} answerLimit={answerLimit}
-                    leaveEditor={leaveEditor}
+                    edit={edit} closedByRefresh={replacement !== undefined}
+                    onEdit={edit => setView(previous => ({ ...previous, edit }))}
+                    leaveEditor={leaveEditor} navigationPending={navigationPending}
                     save={edit => request<Draft>(`${base}/clarification-draft`, {
                       method: 'PUT', headers: { 'Content-Type': 'application/json' },
                       body: JSON.stringify({ request_id: job.id, ...edit }),
                     })}
-                    onSaved={draft => setSubmission(previous => previous && { ...previous, clarification_draft: draft })}
+                    onSaved={draft => setView(previous => {
+                      if (previous.submission?.request.id !== job.id) return previous
+                      return { ...previous, submission: { ...previous.submission, clarification_draft: draft }, edit: undefined }
+                    })}
                     send={send} refresh={refresh} />
                 </div>
               )}

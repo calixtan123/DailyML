@@ -466,7 +466,7 @@ export function Today({ request, active, leaveToday }: {
             </header>
             {editor.item.submitted ? (
               <PracticeFeedback key={editor.item.id} itemId={editor.item.id} request={request} active={active}
-                initial={initialSubmission} answerLimit={session.answer_limit}
+                initial={initialSubmission} answerLimit={session.answer_limit} navigationPending={busy}
                 leaveEditor={feedbackLeave} onStatus={observeGradingStatus} />
             ) : <div className="today-editor">
               <div className="today-editor-label">
