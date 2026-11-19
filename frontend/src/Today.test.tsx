@@ -643,7 +643,9 @@ describe('Clarification draft', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Data leakage/ }))
     await screen.findByRole('heading', { name: 'Data leakage' })
-    fireEvent.click(screen.getByRole('button', { name: /Generalisation/ }))
+    const returnToClarification = screen.getByRole('button', { name: /Generalisation/ })
+    await waitFor(() => expect(returnToClarification).toHaveProperty('disabled', false))
+    fireEvent.click(returnToClarification)
 
     expect(await screen.findByRole('textbox', { name: 'Clarified answer' })).toHaveProperty('value', text)
   })
