@@ -11,9 +11,14 @@ const item = (id: string, title: string, text = '', version = 0, date = '2026-11
     expected_answer_words: [30, 80], difficulty: 'introductory',
   },
   draft: { text, version },
+  submitted: false,
 })
 
-function practiceApi(save?: (edit: { text: string; version: number }) => Promise<Response>, resumed?: ReturnType<typeof item>) {
+function practiceApi(
+  save?: (edit: { text: string; version: number }) => Promise<Response>,
+  resumed?: ReturnType<typeof item>,
+  submissionApi?: (path: string, options?: RequestInit) => Response | Promise<Response>,
+) {
   const first = item('first', 'Generalisation')
   const second = item('second', 'Data leakage')
   const third = item('third', 'Model monitoring')
@@ -22,6 +27,9 @@ function practiceApi(save?: (edit: { text: string; version: number }) => Promise
     goal: 2, answer_limit: 8000, shortage: null,
     selections: [first, second].map(item => ({ item, kind: 'variety' })),
     unfinished: resumed ? [resumed] : [],
+    submitted: [],
+    completion_counts: {} as Record<string, number>,
+    first_use_date: '2026-11-19',
   }
   const fetch = vi.fn(async (path: string, options?: RequestInit) => {
     if (path === '/api/session') return Response.json({ csrf_token: 'test' })
@@ -41,6 +49,7 @@ function practiceApi(save?: (edit: { text: string; version: number }) => Promise
       first.draft = { text: edit.text, version: edit.version + 1 }
       return Response.json(first.draft)
     }
+    if (submissionApi) return submissionApi(path, options)
     throw new Error(`Unexpected request ${path}`)
   })
   vi.stubGlobal('fetch', fetch)
@@ -155,5 +164,69 @@ describe('Today practice editor', () => {
     expect(await screen.findByRole('button', { name: /Model monitoring/ })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Generalisation' })).toBeTruthy()
     expect((editor as HTMLTextAreaElement).value).toBe('Still editing after midnight.')
+  })
+
+  it('credits a saved submission before grading and keeps the other question usable', async () => {
+    const original = 'An original answer with a useful example.'
+    const submission = {
+      text: original, assessed_text: original, credited: true,
+      completed_date: '2026-11-19', completed_timezone: 'Europe/London',
+      request: { id: 'grading', state: 'awaiting_access', feedback: null, message: null },
+    }
+    const { fetch, today } = practiceApi(undefined, undefined, (path, options) => {
+      if (path.endsWith('/submit')) {
+        expect(JSON.parse(String(options?.body))).toMatchObject({ text: original, version: 0 })
+        today.completion_counts[today.local_date] = 1
+        today.selections[0].item = { ...today.selections[0].item, submitted: true }
+        return Response.json({ today, submission })
+      }
+      if (path.endsWith('/submission')) return Response.json(submission)
+      throw new Error(`Unexpected request ${path}`)
+    })
+    render(<App />)
+    const editor = await screen.findByRole('textbox', { name: 'Your answer' })
+    expect(screen.getByText('No practice yet today')).toBeTruthy()
+    fireEvent.change(editor, { target: { value: original } })
+    fireEvent.click(screen.getByRole('button', { name: 'Submit answer' }))
+    expect(await screen.findByText('Waiting for grading access')).toBeTruthy()
+    expect(screen.getByText('1 of 2 completed today')).toBeTruthy()
+    expect(screen.getByText(original)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /Data leakage/ }))
+    expect(await screen.findByRole('textbox', { name: 'Your answer' })).toHaveProperty('value', '')
+    fireEvent.click(screen.getByRole('button', { name: /Generalisation/ }))
+    expect(await screen.findByText('Waiting for grading access')).toBeTruthy()
+    expect(fetch.mock.calls.filter(([path]) => path.endsWith('/submit'))).toHaveLength(1)
+  })
+
+  it('shows stored feedback without retrying and preserves counts above the daily goal', async () => {
+    const { today, fetch } = practiceApi(undefined, undefined, path => {
+      if (!path.endsWith('/submission')) throw new Error(`Unexpected request ${path}`)
+      return Response.json({
+        text: 'Stored original', assessed_text: 'Stored original', credited: true,
+        completed_date: '2026-11-19', completed_timezone: 'Europe/London',
+        request: {
+          id: 'assessed', state: 'assessed', grade: 3,
+          reference: { sources: { reading: 'https://example.org/' } },
+          feedback: {
+            status: 'assessed', summary: 'Tracked evaluation correctly.', corrections: ['State the split.'],
+            model_answer: 'Use a held-out dataset.', reasoning: ['Make the split explicit.'],
+            example: 'A test set is held back.', source_ids: ['reading'],
+          },
+        },
+      })
+    })
+    today.first_use_date = '2026-11-17'
+    today.completion_counts['2026-11-19'] = 3
+    today.selections[0].item = { ...today.selections[0].item, submitted: true }
+    render(<App />)
+    expect(await screen.findByText('Grade 3 of 3')).toBeTruthy()
+    expect(screen.getByText('3 completed today · Goal met')).toBeTruthy()
+    expect(screen.getByLabelText(/Monday, 16 November 2026, Before first use/)).toBeTruthy()
+    expect(screen.getByLabelText(/Tuesday, 17 November 2026, 0 completed, No practice/)).toBeTruthy()
+    expect(screen.getByLabelText(/Friday, 20 November 2026, Future date/)).toBeTruthy()
+    expect(screen.getByText('AI-generated feedback')).toBeTruthy()
+    expect(screen.getByText('State the split.')).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'reading', hidden: true })).toHaveProperty('href', 'https://example.org/')
+    expect(fetch.mock.calls.filter(([path]) => path.endsWith('/retry') || path.endsWith('/submit'))).toHaveLength(0)
   })
 })

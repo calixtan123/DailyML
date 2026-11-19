@@ -70,9 +70,25 @@ class Database:
             Current preference values and version.
         """
         with self.connect() as connection:
-            version, settings_json = connection.execute(
-                "SELECT version, settings_json FROM user_preferences WHERE singleton = ?", (1,)
-            ).fetchone()
+            return self.read_preferences(connection)
+
+    @staticmethod
+    def read_preferences(connection: sqlite3.Connection) -> Preferences:
+        """Read saved settings as part of an existing transaction.
+
+        Parameters
+        ----------
+        connection : sqlite3.Connection
+            Active transaction used by the caller.
+
+        Returns
+        -------
+        Preferences
+            Preference snapshot from the same transaction.
+        """
+        version, settings_json = connection.execute(
+            "SELECT version, settings_json FROM user_preferences WHERE singleton = ?", (1,)
+        ).fetchone()
         return Preferences(version, json.loads(settings_json))
 
     def save_preferences(
@@ -138,3 +154,18 @@ class Database:
                 )
             """)
             connection.execute("CREATE INDEX IF NOT EXISTS model_attempts_by_time ON model_attempts(sent_at)")
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS model_rate_limit_retries (
+                    request_id TEXT PRIMARY KEY REFERENCES model_attempts(request_id), sent_at REAL NOT NULL
+                )
+            """)
+            connection.execute("""
+                CREATE INDEX IF NOT EXISTS model_rate_limit_retries_by_time ON model_rate_limit_retries(sent_at)
+            """)
+            connection.execute("""
+                CREATE TRIGGER IF NOT EXISTS grading_context_immutable
+                BEFORE UPDATE OF context_json, kind, retry_of ON grading_requests
+                BEGIN
+                    SELECT RAISE(ABORT, 'The grading request context and lineage are immutable');
+                END
+            """)

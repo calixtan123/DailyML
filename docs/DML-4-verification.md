@@ -34,3 +34,13 @@ Choosing an exact question reopens its saved overnight draft even when today's p
 | `DML_E2E_EXECUTABLE=/private/tmp/dml4-history-verify.o2fM5aQ5/venv/bin/daily-ml npm --prefix frontend run test:e2e -- --config=/private/tmp/dml4-history-verify.o2fM5aQ5/playwright.config.ts --output=/private/tmp/dml4-history-verify.o2fM5aQ5/forward-results` | One companion Chromium journey passed in 3.6 s. The temporary spec verified failed Forward recovery, the retry and the answer after reloading. |
 
 Installed checks used temporary local data and simulated sign-in. The sandbox blocked temporary loopback ports, and the full runs passed with approved loopback access. The responsive journey checked overflow at 200% CSS zoom. Native Chrome visual and keyboard verification at 200% browser zoom remains pending because macOS ScreenCaptureKit returned `SCStreamErrorDomain -3812` (invalid parameter) when opening Chrome for inspection.
+
+## Browser zoom follow-up
+
+A browser-level zoom check passed against the same installed wheel. The temporary Playwright Chromium profile used `chrome.tabs.setZoom(2)` and confirmed a 2.0 zoom factor. The layout viewport reflowed from 1440 to 720 CSS pixels and the scroll width stayed at 720 CSS pixels. Keyboard input reached and activated the skip link, moved focus to the compact session selector, and activated More questions. The selector then contained three questions, focus moved to the new question heading, and the answer editor stayed available. The viewport capture showed a visible focus ring and a readable session panel. The headless runner could not confirm keyboard selection inside Chromium’s native select popup.
+
+Command (exit 0)
+
+```sh
+node /private/tmp/dml-native-zoom-efj_v_i8/verify.cjs /private/tmp/dml4-history-verify.o2fM5aQ5/venv/bin/daily-ml
+```

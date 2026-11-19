@@ -23,7 +23,10 @@ from .connection import Connection, ConnectionError, ConnectionStatus, SignInSta
 from .database import Database, PreferenceConflict, Preferences
 from .grading import GradingContext
 from .grading_jobs import GradingJobs, RetryConflict
-from .practice import Draft, DraftConflict, DraftInvalid, Practice, PracticeAddition, PracticeItemNotFound, PracticeToday
+from .practice import (
+    Draft, DraftConflict, DraftInvalid, Practice, PracticeAddition, PracticeItemNotFound, PracticeToday,
+    SubmissionConflict,
+)
 from .provider import Provider, ProviderFailure
 
 logger = logging.getLogger(__name__)
@@ -80,6 +83,21 @@ class DraftEdit(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     text: str
     version: int = Field(ge=0, le=2**63 - 1)
+
+
+class SubmitAction(DraftEdit):
+    """One explicit request to save the current editor text as the original."""
+
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+class RetryPractice(BaseModel):
+    """An explicit later send or clarified answer for the displayed request."""
+
+    model_config = ConfigDict(extra="forbid")
+    request_id: UUID
+    text: str | None = None
+    idempotency_key: str = Field(min_length=1, max_length=128)
 
 
 def resolve_assets(assets_dir: Path | None = None) -> Path:
@@ -340,7 +358,7 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         jobs = request.app.state.grading
         result = jobs.enqueue_connection_test(action.idempotency_key, action.model_id, retry_of=action.retry_of)
         if result["state"] == "queued":
-            background.add_task(jobs.run_pending)
+            background.add_task(jobs.run_pending, result["id"])
         return result
 
     @app.get("/api/requests/{request_id}", response_model=None)
@@ -383,6 +401,41 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
     async def draft_conflict(_request: Request, error: DraftConflict):
         """Return the actual saved draft for the local editor's conflict view."""
         return JSONResponse({"detail": str(error), "saved": asdict(error.saved)}, status_code=409)
+
+    @app.exception_handler(SubmissionConflict)
+    async def submission_conflict(_request: Request, error: SubmissionConflict):
+        """Show a conflict without echoing the competing text."""
+        return _error(409, str(error))
+
+    def submission_settings(connection: sqlite3.Connection) -> tuple[str, str | None]:
+        """Use the timezone and model preferences in the locked submission snapshot."""
+        preferences = database.read_preferences(connection)
+        return str(settings_payload(preferences)["timezone"]), model_preferences(preferences)["selected"]
+
+    @app.get("/api/practice/items/{item_id}/submission")
+    def read_submission(item_id: UUID) -> dict | None:
+        """Return a practice answer or assessment without starting grading."""
+        return practice.submission(str(item_id))
+
+    @app.post("/api/practice/items/{item_id}/submit", status_code=202)
+    def submit_practice(item_id: UUID, action: SubmitAction, request: Request, background: BackgroundTasks) -> dict:
+        """Commit the original and its credit before scheduling the grading worker."""
+        result = practice.submit(
+            str(item_id), action.text, expected_version=action.version, resolve_settings=submission_settings,
+        )
+        if result.dispatch_id:
+            background.add_task(request.app.state.grading.run_pending, result.dispatch_id)
+        return {"submission": result.submission, "today": result.today}
+
+    @app.post("/api/practice/items/{item_id}/retry", status_code=202)
+    def retry_practice(item_id: UUID, action: RetryPractice, request: Request, background: BackgroundTasks) -> dict:
+        """Send or clarify a saved answer only after an explicit recovery action."""
+        submission, dispatch_id = practice.retry_submission(
+            str(item_id), str(action.request_id), action.text, resolve_settings=submission_settings,
+        )
+        if dispatch_id:
+            background.add_task(request.app.state.grading.run_pending, dispatch_id)
+        return submission
 
     @app.post("/api/practice/today")
     def open_today() -> PracticeToday:

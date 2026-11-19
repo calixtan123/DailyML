@@ -109,10 +109,38 @@ input { background: var(--input); min-width: 0; width: 180px; }
   font: inherit;
 }
 
-.today-date { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 14px 16px; }
+.practice-calendar { padding: 14px 16px; }
+.today-date { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
 .today-date svg, .today-metadata { color: var(--accent); }
 .today-date time { font-weight: 650; }
 .today-date .muted { margin-left: auto; }
+.practice-week {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+  padding: 0;
+  margin: 12px 0 0;
+  list-style: none;
+}
+.practice-week time {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.practice-week time[aria-current] { border-color: var(--accent); }
+.practice-week [data-completion="Partial"] strong { color: var(--warning); }
+.practice-week [data-completion="Goal met"] strong { color: var(--accent); }
+.practice-credit { color: var(--muted); }
+.practice-feedback { display: grid; gap: 12px; }
+.practice-feedback h4 { margin: 12px 0 4px; font-size: 15px; }
+.practice-feedback summary { cursor: pointer; min-height: 44px; padding-block: 10px; color: var(--accent); }
+.practice-original { white-space: pre-wrap; }
+.practice-clarification .actions { margin-top: 8px; }
 .today-shortage { margin-bottom: 16px; }
 .today-load-error button { margin-top: 12px; }
 .today-grid { display: grid; grid-template-columns: minmax(0, 1fr) 232px; gap: 24px; align-items: start; }

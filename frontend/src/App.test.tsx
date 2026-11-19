@@ -17,8 +17,9 @@ function stubLocalApi(account: Account = null, submitTest?: (options: RequestIni
         return Response.json({
           local_date: '2026-11-19', timezone: 'Europe/London', effective_timezone: 'Europe/London',
           goal: 2, answer_limit: 8000, shortage: null, unfinished: [],
+          submitted: [], completion_counts: {}, first_use_date: '2026-11-19',
           selections: [{ kind: 'variety', item: {
-            id: 'first', local_date: '2026-11-19', draft,
+            id: 'first', local_date: '2026-11-19', draft, submitted: false,
             question: {
               title: 'Generalisation', difficulty: 'introductory', section_title: 'Fundamentals',
               prompt: 'How should we evaluate new rentals?', objective: 'Explain generalisation.',

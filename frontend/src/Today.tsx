@@ -1,6 +1,8 @@
-import { CalendarDays, Plus } from 'lucide-react'
+import { Plus } from 'lucide-react'
 import { type RefObject, useEffect, useRef, useState } from 'react'
 import { LocalApiError, type LocalRequest } from './api'
+import { PracticeCalendar } from './PracticeCalendar'
+import { PracticeFeedback, type SavedSubmission } from './PracticeFeedback'
 import { QuestionBrowser } from './QuestionBrowser'
 
 type Draft = { text: string; version: number }
@@ -16,6 +18,7 @@ type PracticeItem = {
     expected_answer_words: [number, number]
   }
   draft: Draft
+  submitted: boolean
 }
 type Selection = { item: PracticeItem; kind: 'review' | 'variety' | 'extra' | 'focused' }
 type Session = {
@@ -27,6 +30,9 @@ type Session = {
   shortage: string | null
   selections: Selection[]
   unfinished: PracticeItem[]
+  submitted: PracticeItem[]
+  completion_counts: Record<string, number>
+  first_use_date: string
 }
 type Addition = { today: Session; item_id: string | null; message: string | null }
 type Choice = { section_id?: string; question_id?: string }
@@ -35,20 +41,28 @@ type SaveState =
   | { kind: 'idle' | 'saving' | 'saved' }
   | { kind: 'error'; message: string }
   | { kind: 'conflict'; saved: Draft }
+  | { kind: 'submitted_elsewhere' }
 export type LeaveToday = () => Promise<boolean>
 
 const DATE_CHECK_MS = 60_000
 
-function jsonOptions(method: 'POST' | 'PUT', body: Draft | Choice): RequestInit {
+function jsonOptions(method: 'POST' | 'PUT', body: Draft | Choice | (Draft & { idempotency_key: string })): RequestInit {
   return { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
 }
 
 function currentLocalDate(timeZone: string) {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
-  }).formatToParts(Date.now())
-  const part = (type: string) => parts.find(value => value.type === type)?.value
-  return `${part('year')}-${part('month')}-${part('day')}`
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(Date.now())
+    const part = (type: string) => parts.find(value => value.type === type)?.value
+    return `${part('year')}-${part('month')}-${part('day')}`
+  } catch (error) {
+    // Some Python IANA zone names are missing from the browser's catalog.
+    // Let the server check the date on the normal refresh schedule.
+    if (error instanceof RangeError) return undefined
+    throw error
+  }
 }
 
 function savedAlternative(error: unknown): Draft | undefined {
@@ -67,6 +81,12 @@ function updateDraft(session: Session, id: string, draft: Draft): Session {
   }
 }
 
+function findItem(session: Session, id: string) {
+  return session.selections.find(selection => selection.item.id === id)?.item
+    ?? session.unfinished.find(item => item.id === id)
+    ?? session.submitted.find(item => item.id === id)
+}
+
 /** Manage a local editing buffer and switch questions only after every dirty edit is saved. */
 export function Today({ request, active, leaveToday }: {
   request: LocalRequest
@@ -83,12 +103,14 @@ export function Today({ request, active, leaveToday }: {
   const [actionError, setActionError] = useState('')
   const [copyStatus, setCopyStatus] = useState('')
   const [browsing, setBrowsing] = useState(false)
+  const [initialSubmission, setInitialSubmission] = useState<SavedSubmission>()
   const operation = useRef(false)
   const operationVersion = useRef(0)
   const heading = useRef<HTMLHeadingElement>(null)
   const focusQuestion = useRef(false)
   const answer = useRef<HTMLTextAreaElement>(null)
-  const dirty = editor !== undefined && editor.text !== editor.item.draft.text
+  const saveProblem = useRef<HTMLParagraphElement>(null)
+  const dirty = editor !== undefined && !editor.item.submitted && editor.text !== editor.item.draft.text
   const characterCount = Array.from(editor?.text ?? '').length
   const overLimit = session !== undefined && characterCount > session.answer_limit
 
@@ -108,8 +130,13 @@ export function Today({ request, active, leaveToday }: {
         lastSession = today
         setSession(today)
         setLoadError(false)
-        const first = today.selections[0]?.item ?? today.unfinished[0]
-        if (first) setEditor(previous => previous ?? { item: first, text: first.draft.text })
+        const first = today.selections[0]?.item ?? today.unfinished[0] ?? today.submitted[0]
+        if (first) setEditor(previous => {
+          if (!previous) return { item: first, text: first.draft.text }
+          if (previous.text !== previous.item.draft.text) return previous
+          const item = findItem(today, previous.item.id)
+          return item ? { item, text: item.draft.text } : previous
+        })
       } catch {
         if (!controller.signal.aborted) setLoadError(true)
       } finally {
@@ -147,11 +174,18 @@ export function Today({ request, active, leaveToday }: {
     heading.current?.focus()
   }, [editor?.item.id])
 
+  useEffect(() => {
+    if (saveState.kind === 'error' || saveState.kind === 'conflict' || saveState.kind === 'submitted_elsewhere') {
+      saveProblem.current?.focus()
+    }
+  }, [saveState])
+
   function showItem(item: PracticeItem) {
     if (editor?.item.id !== item.id) focusQuestion.current = true
     setEditor({ item, text: item.draft.text })
     setSaveState({ kind: 'idle' })
     setCopyStatus('')
+    setInitialSubmission(undefined)
   }
 
   function acknowledge(draft: Draft) {
@@ -181,10 +215,34 @@ export function Today({ request, active, leaveToday }: {
       return true
     } catch (error) {
       const saved = savedAlternative(error)
-      setSaveState(saved ? { kind: 'conflict', saved } : {
-        kind: 'error', message: 'Could not save your draft. Your text is still here.',
-      })
+      if (saved) setSaveState({ kind: 'conflict', saved })
+      else if (error instanceof LocalApiError && error.status === 409) setSaveState({ kind: 'submitted_elsewhere' })
+      else setSaveState({ kind: 'error', message: 'Could not save your draft. Your text is still here.' })
       return false
+    }
+  }
+
+  async function submitAnswer() {
+    if (!editor || !editor.text.trim() || overLimit) return
+    setSaveState({ kind: 'idle' })
+    setCopyStatus('')
+    try {
+      const result = await request<{ submission: SavedSubmission; today: Session }>(
+        `/api/practice/items/${editor.item.id}/submit`,
+        jsonOptions('POST', { text: editor.text, version: editor.item.draft.version, idempotency_key: crypto.randomUUID() }),
+      )
+      setSession(result.today)
+      const item = findItem(result.today, editor.item.id) ?? { ...editor.item, submitted: true }
+      setEditor({ item, text: item.draft.text })
+      setInitialSubmission(result.submission)
+      heading.current?.focus()
+    } catch (error) {
+      const saved = savedAlternative(error)
+      if (saved) setSaveState({ kind: 'conflict', saved })
+      else if (error instanceof LocalApiError && error.status === 409) setSaveState({ kind: 'submitted_elsewhere' })
+      else setSaveState({
+        kind: 'error', message: 'Could not confirm your submission. Your text is still here. You can submit the same answer again.',
+      })
     }
   }
 
@@ -203,7 +261,7 @@ export function Today({ request, active, leaveToday }: {
 
   async function afterDraftSaved(action?: () => void | Promise<void>): Promise<boolean> {
     const saved = await run(async () => {
-      if (saveState.kind === 'conflict' && dirty) return false
+      if ((saveState.kind === 'conflict' || saveState.kind === 'submitted_elsewhere') && dirty) return false
       if (dirty && !await persistDraft()) return false
       setActionError('')
       await action?.()
@@ -223,8 +281,7 @@ export function Today({ request, active, leaveToday }: {
       try {
         const result = await request<Addition>('/api/practice/items', jsonOptions('POST', choice))
         setSession(result.today)
-        const item = result.today.selections.find(selection => selection.item.id === result.item_id)?.item
-          ?? result.today.unfinished.find(item => item.id === result.item_id)
+        const item = result.item_id ? findItem(result.today, result.item_id) : undefined
         if (item) {
           showItem(item)
           setBrowsing(false)
@@ -263,10 +320,12 @@ export function Today({ request, active, leaveToday }: {
 
   const selections = session?.selections ?? []
   const unfinished = session?.unfinished ?? []
-  const picks = [...selections.map(selection => selection.item), ...unfinished]
+  const submitted = session?.submitted ?? []
+  const picks = [...selections.map(selection => selection.item), ...unfinished, ...submitted]
   const previousItem = editor && !picks.some(item => item.id === editor.item.id) ? editor.item : undefined
-  const resumable = previousItem ? [previousItem, ...unfinished] : unfinished
-  const controlsDisabled = !session || busy || saveState.kind === 'conflict'
+  const resumable = previousItem && !previousItem.submitted ? [previousItem, ...unfinished] : unfinished
+  const submittedItems = previousItem?.submitted ? [previousItem, ...submitted] : submitted
+  const controlsDisabled = !session || busy || saveState.kind === 'conflict' || saveState.kind === 'submitted_elsewhere'
   const question = editor?.item.question
 
   return (
@@ -280,15 +339,8 @@ export function Today({ request, active, leaveToday }: {
         </div>
       )}
       {session && (
-        <div className="panel today-date">
-          <CalendarDays size={19} aria-hidden="true" />
-          <time dateTime={session.local_date}>
-            {new Intl.DateTimeFormat('en-GB', {
-              timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long',
-            }).format(new Date(session.local_date))}
-          </time>
-          <span className="muted">Daily goal: {session.goal} questions</span>
-        </div>
+        <PracticeCalendar localDate={session.local_date} firstUseDate={session.first_use_date}
+          counts={session.completion_counts} goal={session.goal} />
       )}
       {session?.shortage && <p className="notice today-shortage" role="status">{session.shortage}</p>}
       <div className="today-grid">
@@ -304,10 +356,17 @@ export function Today({ request, active, leaveToday }: {
                       .find(item => item.id === event.target.value)
                     if (item) selectItem(item)
                   }}>
-                  {selections.map(({ item }) => <option key={item.id} value={item.id}>{item.question.title}</option>)}
+                  {selections.map(({ item }) => <option key={item.id} value={item.id}>
+                    {item.question.title}{item.submitted ? ' (Submitted)' : ''}
+                  </option>)}
                   {resumable.length > 0 && (
                     <optgroup label="Resume practice">
                       {resumable.map(item => <option key={item.id} value={item.id}>{item.question.title}</option>)}
+                    </optgroup>
+                  )}
+                  {submittedItems.length > 0 && (
+                    <optgroup label="Submitted answers">
+                      {submittedItems.map(item => <option key={item.id} value={item.id}>{item.question.title}</option>)}
                     </optgroup>
                   )}
                 </select>
@@ -321,6 +380,7 @@ export function Today({ request, active, leaveToday }: {
                         <span className="session-order" aria-hidden="true">{index + 1}</span>
                         <span>{item.question.title}<span className="session-kind">
                           {{ review: 'Due review', variety: 'Recommendation', extra: 'Extra practice', focused: 'Focused practice' }[kind]}
+                          {item.submitted && ' · Submitted'}
                         </span></span>
                       </button>
                     </li>
@@ -335,6 +395,21 @@ export function Today({ request, active, leaveToday }: {
                           <button type="button" disabled={controlsDisabled} onClick={() => selectItem(item)}
                             aria-current={editor?.item.id === item.id ? 'true' : undefined}>
                             <span>{item.question.title}<span className="session-kind">{item.local_date}</span></span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+                {submittedItems.length > 0 && (
+                  <>
+                    <h3>Submitted answers</h3>
+                    <ul>
+                      {submittedItems.map(item => (
+                        <li key={item.id}>
+                          <button type="button" disabled={controlsDisabled} onClick={() => selectItem(item)}
+                            aria-current={editor?.item.id === item.id ? 'true' : undefined}>
+                            {item.question.title}
                           </button>
                         </li>
                       ))}
@@ -358,7 +433,10 @@ export function Today({ request, active, leaveToday }: {
               <p>{question.prompt}</p>
               <p className="today-objective">{question.objective}</p>
             </header>
-            <div className="today-editor">
+            {editor.item.submitted ? (
+              <PracticeFeedback key={editor.item.id} itemId={editor.item.id} request={request} active={active}
+                initial={initialSubmission} answerLimit={session.answer_limit} />
+            ) : <div className="today-editor">
               <div className="today-editor-label">
                 <label htmlFor="practice-answer">Your answer</label>
                 <span className="muted">{question.expected_answer_words.join('–')} words suggested</span>
@@ -378,7 +456,10 @@ export function Today({ request, active, leaveToday }: {
               </div>
               <div className="actions today-draft-actions">
                 <button className="primary" type="button"
-                  disabled={!dirty || busy || overLimit || saveState.kind === 'conflict'}
+                  disabled={controlsDisabled || overLimit || !editor.text.trim()}
+                  onClick={() => void run(submitAnswer)}>Submit answer</button>
+                <button type="button"
+                  disabled={!dirty || controlsDisabled || overLimit}
                   onClick={() => void run(async () => { await persistDraft() })}>
                   {saveState.kind === 'error' ? 'Retry save' : 'Save draft'}
                 </button>
@@ -388,10 +469,10 @@ export function Today({ request, active, leaveToday }: {
                   {saveState.kind === 'idle' && (dirty ? 'Unsaved changes' : editor.item.draft.version > 0 && 'Saved draft loaded.')}
                 </p>
               </div>
-              {saveState.kind === 'error' && <p role="alert" className="error">{saveState.message}</p>}
+              {saveState.kind === 'error' && <p role="alert" tabIndex={-1} ref={saveProblem} className="error">{saveState.message}</p>}
               {saveState.kind === 'conflict' && (
                 <div className="today-conflict">
-                  <p role="alert">This draft changed in another tab. Review both versions before choosing which to keep.</p>
+                  <p role="alert" tabIndex={-1} ref={saveProblem}>This draft changed in another tab. Review both versions before choosing which to keep.</p>
                   <label htmlFor="saved-alternative">Saved in another tab</label>
                   <textarea id="saved-alternative" readOnly rows={4} value={saveState.saved.text} />
                   <div className="actions">
@@ -405,13 +486,25 @@ export function Today({ request, active, leaveToday }: {
                   </div>
                 </div>
               )}
-              {(saveState.kind === 'error' || saveState.kind === 'conflict' || overLimit) && (
+              {saveState.kind === 'submitted_elsewhere' && (
+                <div className="today-conflict">
+                  <p role="alert" tabIndex={-1} ref={saveProblem}>
+                    An answer was submitted in another tab. Copy your edit if you want to keep it.
+                  </p>
+                  <button type="button" onClick={() => {
+                    showItem({ ...editor.item, submitted: true })
+                    retryToday()
+                    heading.current?.focus()
+                  }}>View submitted answer</button>
+                </div>
+              )}
+              {(saveState.kind === 'error' || saveState.kind === 'conflict' || saveState.kind === 'submitted_elsewhere' || overLimit) && (
                 <div className="actions today-copy">
                   <button type="button" onClick={() => void copyAnswer()}>Copy my answer</button>
                   <span role="status">{copyStatus}</span>
                 </div>
               )}
-            </div>
+            </div>}
           </article>
         )}
       </div>
