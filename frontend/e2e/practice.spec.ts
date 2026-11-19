@@ -76,10 +76,30 @@ test('Two tabs complete one saved original after London midnight and reopen feed
       const readsAway = submissionReads
       await page.clock.runFor(1_200)
       expect(submissionReads).toBe(readsAway)
+      // Ensure another editable item shares the submitted question's title, regardless of random recommendations.
+      const { csrf_token: csrfToken } = await (await page.request.get(`${origin}/api/session`)).json()
+      const headers = { Origin: origin, 'X-CSRF-Token': csrfToken }
+      const todayResponse = await page.request.post(`${origin}/api/practice/today`, { headers })
+      expect(todayResponse.ok()).toBe(true)
+      const today = await todayResponse.json()
+      const original = today.submitted.find((item: { question: { title: string } }) => item.question.title === title)
+      expect(original).toBeDefined()
+      const repeated = await page.request.post(`${origin}/api/practice/items`, {
+        headers, data: { question_id: original.question.id },
+      })
+      expect(repeated.ok()).toBe(true)
       await writeFile(gate, 'complete')
+      // Read the stored result before the one reload; an inactive original does not poll in the UI.
+      await expect.poll(async () => {
+        const response = await page.request.get(`${origin}/api/practice/items/${original.id}/submission`)
+        expect(response.ok()).toBe(true)
+        return (await response.json()).request.state
+      }, { timeout: 5_000, message: 'The original assessment must be stored before reloading' }).toBe('assessed')
+      expect(submissionReads).toBe(readsAway)
       await page.reload()
-      const submitted = page.getByRole('complementary', { name: 'Today’s session' })
-        .getByRole('button', { name: title })
+      const session = page.getByRole('complementary', { name: 'Today’s session' })
+      await expect(session.getByRole('button', { name: title })).toHaveCount(2)
+      const submitted = session.getByRole('button', { name: `${title} Assessed`, exact: true })
       await submitted.click()
       await expect(page.getByText('Grade 3 of 3')).toBeVisible()
       await expect(page.getByText('Give a concrete example.')).toBeVisible()

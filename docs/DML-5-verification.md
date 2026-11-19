@@ -66,3 +66,33 @@ The race tests ran the Today and Settings interface with controlled local API re
 The learner confirmed the installed app's ChatGPT sign-in and Settings connection test succeeded. Read-only SQLite inspection and local revalidation confirm the real `gpt-6.1-terra` connection test finished `assessed` at 15:53:40.801436 UTC, with grade 3/3, valid feedback, one model attempt and no retry. Full request, schema, prompt, runtime versions and verification method are recorded in [DML-2-verification.md](DML-2-verification.md#recorded-live-result-19-november-2026). This supersedes the earlier pending live-dependency statements in this document. No additional model request was sent for verification.
 
 There is no live practice request in the saved ledger. The live proof clears the DML-2 integration dependency; the submission, calendar, retry and concurrency evidence above remains offline. Native screen-reader behavior and a fresh live MagicPath reference comparison remain unverified as previously disclosed.
+
+
+## CI browser selector follow-up on 19 November 2026
+
+After London midnight, an editable session item can share its question title with an assessed original. The browser proof now uses the protected local practice API to ensure a second item for that same question, asserts that both title matches exist, and reopens the original using the exact accessible name `<question title> Assessed`. The duplicate may be a recommendation or focused practice item; production selection remains random. All existing two-tab, original-answer, calendar-credit, model-attempt, responsive-layout and offline-feedback assertions remain in place.
+
+| Command | Result |
+| --- | --- |
+| `DML_E2E_EXECUTABLE=/private/tmp/dml-live-launch-20261119/venv/bin/daily-ml npm --prefix frontend run test:e2e -- practice.spec.ts --output=/private/tmp/dml45-ci-fix-red` (deterministic setup, original locator) | Exit 1 as expected: strict-mode violation resolved both `Evaluation metrics Focused practice` and `Evaluation metrics Assessed`. |
+| `DML_E2E_EXECUTABLE=/private/tmp/dml-live-launch-20261119/venv/bin/daily-ml npm --prefix frontend run test:e2e -- practice.spec.ts --output=/private/tmp/dml45-ci-fix-green` | One browser journey passed in 2.7 s, exit 0, with the exact assessed locator. |
+| `DML_E2E_EXECUTABLE=/private/tmp/dml-live-launch-20261119/venv/bin/daily-ml npm --prefix frontend run test:e2e -- --output=/private/tmp/dml45-ci-fix-full` | Both browser journeys passed in 5.2 s, exit 0. |
+| `npm --prefix frontend run typecheck` | Exit 0. |
+| `git diff --check` | Exit 0. |
+
+The browser runs used approved local loopback/Chromium access and the installed offline-provider harness. No live provider request was sent. This is local verification; hosted CI must still rerun against the pushed fix.
+
+
+## CI stored-assessment wait follow-up
+
+Releasing the offline grading gate does not guarantee its result is already committed. If reload reads an inactive original while grading is still in progress, that session label does not poll to completion. The browser proof now uses a bounded five-second `expect.poll` on the known original's read-only submission endpoint, waits for its stored request state to be `assessed`, then reloads once and uses the exact assessed selector. These test-setup reads bypass browser routing; an explicit unchanged-counter assertion preserves the UI polling proof.
+
+| Command | Result |
+| --- | --- |
+| `DML_E2E_EXECUTABLE=/private/tmp/dml-live-launch-20261119/venv/bin/daily-ml npm --prefix frontend run test:e2e -- practice.spec.ts --output=/private/tmp/dml45-ci-fix-race-red` (temporary stale-snapshot reproduction) | Exit 1 as expected: holding the gate until the reloaded session visibly showed `Grading in progress` left the exact assessed selector unavailable and hit the 30-second test bound. Temporary reproduction removed. |
+| `DML_E2E_EXECUTABLE=/private/tmp/dml-live-launch-20261119/venv/bin/daily-ml npm --prefix frontend run test:e2e -- practice.spec.ts --output=/private/tmp/dml45-ci-fix-race-green` | One journey passed in 2.2 s, exit 0, with the bounded stored-state wait. |
+| `DML_E2E_EXECUTABLE=/private/tmp/dml-live-launch-20261119/venv/bin/daily-ml npm --prefix frontend run test:e2e -- --output=/private/tmp/dml45-ci-fix-race-full` | Both journeys passed in 4.6 s, exit 0. |
+| `npm --prefix frontend run typecheck` | Exit 0. |
+| `git diff --check` | Exit 0 after final documentation update. |
+
+All grading remained offline and controlled. No app or provider harness changes were needed; hosted CI still requires the parent-owned push.
