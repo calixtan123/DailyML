@@ -60,3 +60,38 @@ test('opens a dispute, compares a reassessment and accepts it explicitly', async
   expect(await screen.findByText('Reassessment accepted.')).toBeTruthy()
   expect(screen.getByText(objection)).toBeTruthy()
 })
+
+test('shows the latest reassessment and reuses its action key after a lost response', async () => {
+  const submission = initialSubmission()
+  const firstFailure = {
+    ...assessment('old-retry', ''), state: 'failed_recoverable' as const,
+    feedback: null, message: 'Earlier retry failed.', can_send: true,
+  }
+  const currentFailure = { ...firstFailure, id: 'latest-retry', message: 'Latest retry failed.' }
+  const dispute = {
+    id: 'dispute', status: 'open' as const, target_request_id: 'first',
+    role: 'original' as const, objection: 'Check the rubric.', selected_request_id: null,
+    assessments: [submission.request, firstFailure, currentFailure],
+  }
+  submission.disputes = [dispute]
+  const keys: string[] = []
+  const request: LocalRequest = async <T,>(path: string, options?: RequestInit) => {
+    if (path.endsWith('/reassess')) {
+      keys.push(JSON.parse(String(options?.body)).idempotency_key)
+      if (keys.length === 1) throw new Error('Response lost')
+      dispute.assessments.push(assessment('reassessment', 'Updated explanation.'))
+    }
+    return structuredClone(submission) as T
+  }
+  render(<PracticeFeedback itemId="item" active request={request} initial={submission}
+    answerLimit={8000} navigationPending={false} leaveEditor={{ current: null }} onStatus={vi.fn()} />)
+
+  expect(await screen.findByText('Latest retry failed.')).toBeTruthy()
+  expect(screen.queryByText('Earlier retry failed.')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Retry reassessment' }))
+  expect(await screen.findByText(/Could not confirm the dispute action/)).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: 'Retry reassessment' }))
+  expect(await screen.findByText('Updated explanation.')).toBeTruthy()
+  expect(keys[0]).toEqual(expect.any(String))
+  expect(keys).toEqual([keys[0], keys[0]])
+})

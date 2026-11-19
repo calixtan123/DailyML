@@ -129,6 +129,11 @@ const RECOVERABLE = new Set<GradingRequest['state']>([
   'awaiting_access', 'awaiting_allowance', 'outcome_unknown', 'failed_recoverable',
 ])
 
+function disputeReviewState(saved: SavedSubmission | undefined) {
+  return JSON.stringify((saved?.disputes ?? []).filter(dispute => dispute.role === 'original')
+    .map(({ id, selected_request_id }) => [id, selected_request_id]))
+}
+
 function isActive(job: GradingRequest | undefined) {
   return job?.state === 'in_flight' || (job?.state === 'queued' && !job.can_send)
 }
@@ -250,7 +255,7 @@ function AssessmentDispute({ job, dispute, disabled, act }: {
 
   const originalId = dispute.target_request_id
   const reassessments = dispute.assessments.filter(candidate => candidate.id !== originalId)
-  const latest = reassessments.find(candidate => candidate.state !== 'assessed')
+  const latest = reassessments.at(-1)
   const available = reassessments.filter(candidate => candidate.state === 'assessed')
   const base = `disputes/${dispute.id}`
   const isOpen = dispute.status === 'open'
@@ -312,6 +317,7 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
   const [busy, setBusy] = useState(false)
   const action = useRef<AbortController | undefined>(undefined)
   const actionVersion = useRef(0)
+  const reassessmentKeys = useRef(new Map<string, string>())
   const lastRead = useRef(initial)
   const focusAfterSend = useRef(false)
   const originalHeading = useRef<HTMLHeadingElement>(null)
@@ -342,6 +348,7 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
         const saved = await request<SavedSubmission | null>(`${base}/submission`, { signal: controller.signal })
         if (controller.signal.aborted || version !== actionVersion.current) return
         if (!saved) throw new Error('Submitted answer unavailable')
+        if (disputeReviewState(lastRead.current) !== disputeReviewState(saved)) onReviewsChanged?.()
         lastRead.current = saved
         setView(previous => mergeRead(previous, saved))
         const job = saved.revision?.request ?? saved.request
@@ -361,7 +368,7 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
       clearTimeout(timer)
       controller.abort()
     }
-  }, [base, request, active, reload, itemId, onStatus])
+  }, [base, request, active, reload, itemId, onStatus, onReviewsChanged])
 
   function refresh() {
     setActionError('')
@@ -428,6 +435,11 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
     actionVersion.current += 1
     setBusy(true)
     setActionError('')
+    if (route.endsWith('/reassess')) {
+      const key = reassessmentKeys.current.get(route) ?? crypto.randomUUID()
+      reassessmentKeys.current.set(route, key)
+      payload = { idempotency_key: key }
+    }
     try {
       const saved = await request<SavedSubmission>(`${base}/${route}`, {
         method: 'POST', signal: controller.signal,
@@ -435,12 +447,14 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
         body: payload ? JSON.stringify(payload) : undefined,
       })
       if (controller.signal.aborted) return false
+      reassessmentKeys.current.delete(route)
       lastRead.current = saved
       setView(previous => mergeRead(previous, saved))
       if (route === 'disputes' || route.endsWith('/resolve')) onReviewsChanged?.()
       setReload(value => value + 1)
       return true
     } catch (error) {
+      if (error instanceof LocalApiError && error.status < 500) reassessmentKeys.current.delete(route)
       if (!controller.signal.aborted) {
         setActionError(error instanceof LocalApiError
           ? error.message : 'Could not confirm the dispute action. Refresh the status before trying again.')
