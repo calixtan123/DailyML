@@ -115,9 +115,10 @@ function findItem(session: Session, id: string) {
 }
 
 /** Manage a local editing buffer and switch questions only after every dirty edit is saved. */
-export function Today({ request, active, leaveToday }: {
+export function Today({ request, active, leaveToday, resumeItemId }: {
   request: LocalRequest
   active: boolean
+  resumeItemId?: string
   leaveToday: RefObject<LeaveToday | null>
 }) {
   const [session, setSession] = useState<Session>()
@@ -132,6 +133,7 @@ export function Today({ request, active, leaveToday }: {
   const [copyStatus, setCopyStatus] = useState('')
   const [browsing, setBrowsing] = useState(false)
   const [initialSubmission, setInitialSubmission] = useState<SavedSubmission>()
+  const openedResume = useRef<string | undefined>(undefined)
   const feedbackLeave = useRef<LeaveEditor | null>(null)
   const lastStatus = useRef<{ itemId: string; status: GradingStatus }>(undefined)
   const reviewActionKeys = useRef(new Map<string, string>())
@@ -171,6 +173,7 @@ export function Today({ request, active, leaveToday }: {
   })
 
   useEffect(() => {
+    if (!active || !resumeItemId) openedResume.current = undefined
     if (!active) return
     const controller = new AbortController()
     let loading = false
@@ -186,6 +189,9 @@ export function Today({ request, active, leaveToday }: {
       const priorStatus = lastStatus.current
       try {
         let today = await request<Session>('/api/practice/today', { method: 'POST', signal: controller.signal })
+        const target = resumeItemId && openedResume.current !== resumeItemId
+          ? await request<PracticeItem>(`/api/practice/items/${resumeItemId}`, { signal: controller.signal })
+          : undefined
         if (controller.signal.aborted || version !== operationVersion.current) return
         const observed = lastStatus.current
         if (observed && observed !== priorStatus) {
@@ -193,6 +199,11 @@ export function Today({ request, active, leaveToday }: {
         }
         setSession(today)
         setLoadError(false)
+        if (target) {
+          openedResume.current = target.id
+          showResumedItem(target)
+          return
+        }
         const first = today.selections[0]?.item ?? today.unfinished[0] ?? today.submitted[0]
         if (first) setEditor(previous => {
           if (!previous) return { item: first, text: first.draft.text }
@@ -220,7 +231,7 @@ export function Today({ request, active, leaveToday }: {
       window.clearInterval(timer)
       window.removeEventListener('focus', checkToday)
     }
-  }, [request, active, loadAttempt, requestTodayRefresh])
+  }, [request, active, loadAttempt, requestTodayRefresh, resumeItemId])
 
   useUnsavedDraftWarning(dirty)
 
@@ -244,6 +255,12 @@ export function Today({ request, active, leaveToday }: {
     setReviewError('')
     setInitialSubmission(undefined)
   }
+
+  const showResumedItem = useEffectEvent((item: PracticeItem) => {
+    showItem(item)
+    setNotice('')
+    setBrowsing(false)
+  })
 
   function acknowledge(draft: Draft) {
     if (!editor) return

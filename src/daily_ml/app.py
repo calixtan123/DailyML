@@ -24,7 +24,7 @@ from .database import Database, PreferenceConflict, Preferences
 from .grading import GradingContext
 from .grading_jobs import GradingJobs, RetryConflict
 from .practice import (
-    Draft, DraftConflict, DraftInvalid, Practice, PracticeAddition, PracticeItemNotFound, PracticeToday,
+    Draft, DraftConflict, DraftInvalid, Practice, PracticeAddition, PracticeItem, PracticeItemNotFound, PracticeToday,
     SubmissionConflict,
 )
 from .provider import Provider, ProviderFailure
@@ -419,6 +419,11 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         """Use the timezone and model preferences in the locked submission snapshot."""
         preferences = database.read_preferences(connection)
         return str(settings_payload(preferences)["timezone"]), model_preferences(preferences)["selected"]
+
+    @app.get("/api/practice/items/{item_id}")
+    def saved_practice_item(item_id: UUID) -> PracticeItem:
+        """Open the original editor for a saved item, including a retired question."""
+        return practice.saved_item(str(item_id))
 
     @app.get("/api/practice/items/{item_id}/submission")
     def read_submission(item_id: UUID) -> dict | None:

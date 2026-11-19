@@ -561,6 +561,23 @@ class Practice:
             submission = self._read_submission(connection, item_id)
         return SubmissionResult(submission, today, dispatch_id)
 
+    def saved_item(self, item_id: str) -> PracticeItem:
+        """Read an exact saved editor item without selecting it for today's practice."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """SELECT item.id, item.local_date, item.section_title, item.snapshot_json,
+                          item.draft_text, item.draft_version, request.state, request.error
+                   FROM practice_items AS item
+                   LEFT JOIN practice_submissions AS submission ON submission.item_id = item.id
+                   LEFT JOIN practice_revisions AS revision ON revision.item_id = item.id
+                   LEFT JOIN grading_requests AS request
+                     ON request.id = COALESCE(revision.current_request_id, submission.current_request_id)
+                   WHERE item.id = ?""", (item_id,),
+            ).fetchone()
+        if row is None:
+            raise PracticeItemNotFound
+        return self._item(row)
+
     def submission(self, item_id: str) -> dict | None:
         """Read the saved answer and current feedback without dispatching a request.
 
