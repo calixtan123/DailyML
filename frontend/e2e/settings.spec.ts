@@ -16,7 +16,7 @@ async function stop(process: ChildProcess) {
   })
 }
 
-test('The installed app browses questions and preserves Settings and sign-in controls',
+test('The installed app saves practice drafts and preserves Settings and sign-in controls',
   async ({ page, context }) => {
     const root = await mkdtemp(join(tmpdir(), 'daily-ml browser '))
     const executable = process.env.DML_E2E_EXECUTABLE ?? resolve('../.venv/bin/daily-ml')
@@ -59,23 +59,110 @@ test('The installed app browses questions and preserves Settings and sign-in con
       })
 
       await page.goto(origin)
-      await expect(page.getByRole('heading', { name: 'Browse questions' })).toBeVisible()
+      await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible()
       await expect(page).toHaveTitle('Today · Daily ML Practice')
-      const section = page.getByRole('combobox', { name: 'Section', exact: true })
-      await expect(section).toHaveValue('fundamentals')
-      await expect(section.getByRole('option')).toHaveCount(6)
       await page.keyboard.press('Tab')
       const skip = page.getByRole('link', { name: 'Skip to content' })
       await expect(skip).toBeFocused()
       await skip.press('Enter')
       await expect(page.getByRole('main')).toBeFocused()
+
+      await page.setViewportSize({ width: 1440, height: 900 })
+      const session = page.getByRole('complementary', { name: 'Today’s session' })
+      const items = session.getByRole('list').getByRole('button')
+      await expect(items).toHaveCount(2)
+      const pair = await items.allTextContents()
+      const editor = page.getByRole('textbox', { name: 'Your answer' })
+      const practiceTitle = page.locator('#practice-question-title')
+      const firstQuestion = await practiceTitle.textContent()
+      const secondTab = await context.newPage()
+      await secondTab.goto(origin)
+      await expect(secondTab.getByRole('textbox', { name: 'Your answer' })).toBeVisible()
+      await expect(secondTab.locator('#practice-question-title')).toHaveText(firstQuestion ?? '')
+      await secondTab.setViewportSize({ width: 1440, height: 900 })
+      expect(await secondTab.getByRole('complementary', { name: 'Today’s session' })
+        .getByRole('list').getByRole('button').allTextContents()).toEqual(pair)
+
+      const saveRoute = '**/api/practice/items/*/draft'
+      await page.route(saveRoute, (route) => route.fulfill({
+        status: 503, json: { detail: 'Simulated local save failure.' },
+      }))
+      await editor.fill('Keep my edit until the save succeeds.')
+      await items.nth(1).click()
+      await expect(page.getByRole('alert')).toHaveText('Could not save your draft. Your text is still here.')
+      await expect(page.getByRole('alert')).toBeFocused()
+      await expect(editor).toHaveValue('Keep my edit until the save succeeds.')
+      await expect(practiceTitle).toHaveText(firstQuestion ?? '')
+      await page.unroute(saveRoute)
+      await items.nth(1).click()
+      await expect(practiceTitle).not.toHaveText(firstQuestion ?? '')
+      await expect(practiceTitle).toBeFocused()
+
+      const otherEditor = secondTab.getByRole('textbox', { name: 'Your answer' })
+      await otherEditor.fill('My stale tab’s edit.')
+      await secondTab.getByRole('button', { name: 'Save draft' }).click()
+      await expect(secondTab.getByRole('textbox', { name: 'Saved in another tab' }))
+        .toHaveValue('Keep my edit until the save succeeds.')
+      await expect(secondTab.getByRole('alert')).toBeFocused()
+      await expect(otherEditor).toHaveValue('My stale tab’s edit.')
+      await secondTab.getByRole('button', { name: 'Use saved version' }).click()
+      await expect(otherEditor).toHaveValue('Keep my edit until the save succeeds.')
+      await secondTab.close()
+      await page.reload()
+      await expect(editor).toHaveValue('Keep my edit until the save succeeds.')
+
+      await page.getByRole('link', { name: 'Settings', exact: true }).click()
+      await expect(page).toHaveTitle('Settings · Daily ML Practice')
+      await page.getByRole('link', { name: 'Today', exact: true }).click()
+      await editor.fill('Save this answer before moving through browser history.')
+      await page.route(saveRoute, (route) => route.fulfill({
+        status: 503, json: { detail: 'Simulated local save failure.' },
+      }))
+      await page.goBack()
+      await expect(page.getByRole('alert')).toHaveText('Could not save your draft. Your text is still here.')
+      await expect(page).toHaveURL(`${origin}/#/today`)
+      await expect(editor).toHaveValue('Save this answer before moving through browser history.')
+
+      await page.unroute(saveRoute)
+      await page.goBack()
+      await expect(page).toHaveTitle('Settings · Daily ML Practice')
+      await page.goForward()
+      await expect(page).toHaveTitle('Today · Daily ML Practice')
+      await page.reload()
+      await expect(editor).toHaveValue('Save this answer before moving through browser history.')
+
+      const compact = page.getByRole('combobox', { name: 'Session question', exact: true })
+      for (const width of [1440, 1024, 768, 390, 320]) {
+        await page.setViewportSize({ width, height: 900 })
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
+        if (width > 1020) {
+          await expect(compact).toBeHidden()
+          expect((await session.boundingBox())?.width).toBe(232)
+          expect(await page.locator('.today-grid').evaluate(node => getComputedStyle(node).columnGap)).toBe('24px')
+        } else {
+          await expect(compact).toBeVisible()
+          expect((await compact.boundingBox())?.height).toBeGreaterThanOrEqual(44)
+        }
+        await expect(page.getByRole('button', { name: 'More questions' })).toBeVisible()
+      }
+      await page.setViewportSize({ width: 390, height: 900 })
+      await page.getByRole('button', { name: 'More questions' }).click()
+      await expect(compact.getByRole('option')).toHaveCount(3)
+
+      const browse = page.locator('.today-bank > summary')
+      await browse.focus()
+      await page.keyboard.press('Enter')
+      const section = page.getByRole('combobox', { name: 'Section', exact: true })
+      await expect(section).toHaveValue('fundamentals')
+      await expect(section.getByRole('option')).toHaveCount(6)
+      await expect(browse).toBeFocused()
       await page.keyboard.press('Tab')
       await expect(section).toBeFocused()
       await section.selectOption('deployment')
       await expect(section).toHaveValue('deployment')
-      await expect(page.getByRole('heading', { name: 'Batch versus online inference' })).toBeVisible()
-      await expect(page.getByText(/A shop wants to score every item overnight/)).toBeVisible()
-      await expect(page.getByText(/Choose batch or online inference based on/)).toBeVisible()
+      await expect(page.locator('#bank-question-title')).toHaveText('Batch versus online inference')
+      await expect(page.locator('.browser-question').getByText(/A shop wants to score every item overnight/)).toBeVisible()
+      await expect(page.locator('.browser-question').getByText(/Choose batch or online inference based on/)).toBeVisible()
       for (const width of [1440, 1024, 768, 390, 320]) {
         await page.setViewportSize({ width, height: 900 })
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
@@ -85,8 +172,10 @@ test('The installed app browses questions and preserves Settings and sign-in con
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(768)
       await section.selectOption('forests')
       await expect(page.getByRole('combobox', { name: 'Question', exact: true }).getByRole('option')).toHaveCount(2)
-      await expect(page.getByRole('heading', { name: 'How random forests work' })).toBeVisible()
+      await expect(page.locator('#bank-question-title')).toHaveText('How random forests work')
       await page.evaluate(() => { document.body.style.zoom = '1' })
+      await page.getByRole('button', { name: 'Practise this question' }).click()
+      await expect(practiceTitle).toHaveText('How random forests work')
 
       await page.getByRole('link', { name: 'Settings', exact: true }).click()
       await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible()
@@ -130,7 +219,7 @@ test('The installed app browses questions and preserves Settings and sign-in con
       await expect(timezone).toHaveValue('UTC')
 
       await page.getByRole('link', { name: 'Today', exact: true }).click()
-      await expect(page.getByRole('heading', { name: 'Browse questions' })).toBeVisible()
+      await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible()
       await expect(page).toHaveTitle('Today · Daily ML Practice')
     } finally {
       await stop(child)

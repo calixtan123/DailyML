@@ -4,7 +4,9 @@ import logging
 import secrets
 import sqlite3
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
+from uuid import UUID
 
 from fastapi import BackgroundTasks, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -21,6 +23,10 @@ from .connection import Connection, ConnectionError, ConnectionStatus, SignInSta
 from .database import Database, PreferenceConflict, Preferences
 from .grading import GradingContext
 from .grading_jobs import GradingJobs, RetryConflict
+from .practice import (
+    Draft, DraftConflict, DraftInvalid, Practice, PracticeAddition, PracticeItemNotFound, PracticeToday,
+    SubmissionConflict,
+)
 from .provider import Provider, ProviderFailure
 
 logger = logging.getLogger(__name__)
@@ -61,6 +67,44 @@ class TestAction(ModelSelection):
 
     idempotency_key: str = Field(min_length=1, max_length=128)
     retry_of: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class PracticeChoice(BaseModel):
+    """Choose varied practice, a focused section or a specific bank question."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    section_id: str | None = Field(default=None, pattern=ID_PATTERN, max_length=64)
+    question_id: str | None = Field(default=None, pattern=ID_PATTERN, max_length=64)
+
+
+class DraftEdit(BaseModel):
+    """Save the editor text against the last observed draft version."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    text: str
+    version: int = Field(ge=0, le=2**63 - 1)
+
+
+class ClarificationDraftEdit(DraftEdit):
+    """Save a draft for the displayed clarification request."""
+
+    request_id: UUID = Field(strict=False)
+
+
+class SubmitAction(DraftEdit):
+    """One explicit request to save the current editor text as the original."""
+
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+class RetryPractice(BaseModel):
+    """An explicit later send or clarified answer for the displayed request."""
+
+    model_config = ConfigDict(extra="forbid")
+    request_id: UUID
+    text: str | None = None
+    version: int = Field(default=0, strict=True, ge=0, le=2**63 - 1)
+    idempotency_key: str = Field(min_length=1, max_length=128)
 
 
 def resolve_assets(assets_dir: Path | None = None) -> Path:
@@ -118,6 +162,7 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
     bank = validate_bank()
     database = Database(settings.data_dir)
     import_bank(database, bank)
+    practice = Practice(database, answer_limit=settings.answer_limit)
     host = f"127.0.0.1:{port}"
     origin = f"http://{host}"
     cookie_name = f"daily_ml_session_{port}"
@@ -179,6 +224,8 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         logger.info("Local database operation failed")
         if request.url.path in {"/api/sections", "/api/questions"}:
             return _error(503, "Could not read the question bank. Try again.")
+        if request.url.path.startswith("/api/practice/"):
+            return _error(503, "Could not access saved practice. Try again.")
         return _error(503, "Could not access local settings. Try again.")
 
     @app.exception_handler(PreferenceConflict)
@@ -196,6 +243,8 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         """Do not echo input in request validation responses."""
         if request.url.path == "/api/questions":
             return _error(422, "Choose a valid section.")
+        if request.url.path.startswith("/api/practice/"):
+            return _error(422, "The practice request was invalid.")
         return _error(422, "The settings request was invalid.")
 
     @app.get("/")
@@ -316,7 +365,7 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         jobs = request.app.state.grading
         result = jobs.enqueue_connection_test(action.idempotency_key, action.model_id, retry_of=action.retry_of)
         if result["state"] == "queued":
-            background.add_task(jobs.run_pending)
+            background.add_task(jobs.run_pending, result["id"])
         return result
 
     @app.get("/api/requests/{request_id}", response_model=None)
@@ -340,6 +389,83 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
             "version": preferences.version,
             "source": "preferences" if timezone else "default",
         }
+
+    def practice_timezone() -> str:
+        """Read the same effective timezone displayed in Settings."""
+        return str(settings_payload(database.get_preferences())["timezone"])
+
+    @app.exception_handler(PracticeItemNotFound)
+    async def missing_practice_item(_request: Request, _error_detail: PracticeItemNotFound):
+        """Avoid echoing the missing practice identity or question ID."""
+        return _error(404, "This question is unavailable. Choose another question.")
+
+    @app.exception_handler(DraftInvalid)
+    async def invalid_draft(_request: Request, error: DraftInvalid):
+        """Return a safe validation message without answer text."""
+        return _error(422, str(error))
+
+    @app.exception_handler(DraftConflict)
+    async def draft_conflict(_request: Request, error: DraftConflict):
+        """Return the actual saved draft for the local editor's conflict view."""
+        return JSONResponse({"detail": str(error), "saved": asdict(error.saved)}, status_code=409)
+
+    @app.exception_handler(SubmissionConflict)
+    async def submission_conflict(_request: Request, error: SubmissionConflict):
+        """Show a conflict without echoing the competing text."""
+        return _error(409, str(error))
+
+    def submission_settings(connection: sqlite3.Connection) -> tuple[str, str | None]:
+        """Use the timezone and model preferences in the locked submission snapshot."""
+        preferences = database.read_preferences(connection)
+        return str(settings_payload(preferences)["timezone"]), model_preferences(preferences)["selected"]
+
+    @app.get("/api/practice/items/{item_id}/submission")
+    def read_submission(item_id: UUID) -> dict | None:
+        """Return a practice answer or assessment without starting grading."""
+        return practice.submission(str(item_id))
+
+    @app.post("/api/practice/items/{item_id}/submit", status_code=202)
+    def submit_practice(item_id: UUID, action: SubmitAction, request: Request, background: BackgroundTasks) -> dict:
+        """Commit the original and its credit before scheduling the grading worker."""
+        result = practice.submit(
+            str(item_id), action.text, expected_version=action.version, resolve_settings=submission_settings,
+        )
+        if result.dispatch_id:
+            background.add_task(request.app.state.grading.run_pending, result.dispatch_id)
+        return {"submission": result.submission, "today": result.today}
+
+    @app.post("/api/practice/items/{item_id}/retry", status_code=202)
+    def retry_practice(item_id: UUID, action: RetryPractice, request: Request, background: BackgroundTasks) -> dict:
+        """Send or clarify a saved answer only after an explicit recovery action."""
+        submission, dispatch_id = practice.retry_submission(
+            str(item_id), str(action.request_id), action.text,
+            expected_version=action.version, resolve_settings=submission_settings,
+        )
+        if dispatch_id:
+            background.add_task(request.app.state.grading.run_pending, dispatch_id)
+        return submission
+
+    @app.put("/api/practice/items/{item_id}/clarification-draft")
+    def save_clarification_draft(item_id: UUID, edit: ClarificationDraftEdit) -> Draft:
+        """Save exact clarification text locally without requesting grading."""
+        return practice.save_clarification_draft(
+            str(item_id), str(edit.request_id), edit.text, expected_version=edit.version,
+        )
+
+    @app.post("/api/practice/today")
+    def open_today() -> PracticeToday:
+        """Prepare and return the current date's saved local practice session."""
+        return practice.today(practice_timezone())
+
+    @app.post("/api/practice/items")
+    def add_practice(choice: PracticeChoice) -> PracticeAddition:
+        """Save or resume a requested extra question in the local session."""
+        return practice.add_item(practice_timezone(), section_id=choice.section_id, question_id=choice.question_id)
+
+    @app.put("/api/practice/items/{item_id}/draft")
+    def save_draft(item_id: UUID, edit: DraftEdit) -> Draft:
+        """Persist a versioned draft and return the committed text and version."""
+        return practice.save_draft(str(item_id), edit.text, expected_version=edit.version, timezone=practice_timezone())
 
     @app.get("/api/settings")
     def read_settings() -> dict[str, str | int]:

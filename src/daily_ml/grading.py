@@ -6,6 +6,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
+from .bank import EditorialText
 from .config import Settings
 
 PROMPT_VERSION = "rubric-v1"
@@ -26,7 +27,7 @@ class Criterion(BaseModel):
     """One approved rubric criterion and its relative importance."""
 
     id: Identifier
-    description: Text
+    description: EditorialText
     weight: Decimal = Field(gt=0, allow_inf_nan=False)
 
 
@@ -34,9 +35,9 @@ class GradingContext(BaseModel):
     """The versioned content needed to judge a single answer."""
 
     version: Identifier
-    question: Text
+    question: EditorialText
     answer: str = Field(min_length=1)
-    reference: Text
+    reference: EditorialText
     criteria: list[Criterion] = Field(min_length=1, max_length=8)
     critical_misconceptions: dict[str, str]
     sources: dict[str, str]
