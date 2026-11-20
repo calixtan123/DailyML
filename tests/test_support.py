@@ -284,6 +284,46 @@ def test_existing_credit_schema_migrates_and_preserves_answer_credit(database):
         assert connection.execute("SELECT item_id FROM practice_credits").fetchall() == [(item.id,)]
 
 
+def test_interrupted_credit_migration_preserves_legacy_schema_and_data(database, monkeypatch):
+    """A later initialization error rolls back the whole legacy-credit migration."""
+    practice = service(database)
+    item = practice.today(LONDON).selections[0].item
+    practice.submit(
+        item.id, "An answer before the interrupted migration.", expected_version=0,
+        resolve_settings=lambda _connection: (LONDON, None),
+    )
+    with database.connect(immediate=True) as connection:
+        connection.execute("DROP INDEX practice_credits_by_date")
+        connection.execute("ALTER TABLE practice_credits RENAME TO practice_credits_new")
+        connection.execute(
+            """CREATE TABLE practice_credits (
+                question_id TEXT NOT NULL,
+                local_date TEXT NOT NULL REFERENCES practice_days(local_date),
+                item_id TEXT NOT NULL UNIQUE REFERENCES practice_submissions(item_id),
+                FOREIGN KEY (item_id, question_id) REFERENCES practice_items(id, question_id),
+                PRIMARY KEY (question_id, local_date)
+            )"""
+        )
+        connection.execute(
+            "INSERT INTO practice_credits SELECT question_id, local_date, item_id FROM practice_credits_new"
+        )
+        connection.execute("DROP TABLE practice_credits_new")
+        connection.execute("CREATE INDEX practice_credits_by_date ON practice_credits(local_date)")
+
+    def interrupt_initialization(*_args, **_kwargs):
+        raise sqlite3.OperationalError("simulated initialization interruption")
+
+    monkeypatch.setattr("daily_ml.practice.initialize_reviews", interrupt_initialization)
+
+    with pytest.raises(sqlite3.OperationalError, match="interruption"):
+        service(database)
+
+    with database.connect() as connection:
+        foreign_keys = connection.execute("PRAGMA foreign_key_list(practice_credits)").fetchall()
+        assert any(row[2] == "practice_submissions" for row in foreign_keys)
+        assert connection.execute("SELECT item_id FROM practice_credits").fetchall() == [(item.id,)]
+
+
 def test_gap_records_survive_sqlite_backup_and_restore(database, tmp_path):
     practice = service(database)
     item = practice.today(LONDON).selections[0].item

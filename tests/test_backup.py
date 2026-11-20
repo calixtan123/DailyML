@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from daily_ml.bank import import_bank, validate_bank
 from daily_ml.database import BackupError, Database
 from daily_ml.practice import Practice
 from daily_ml import cli
@@ -25,6 +26,24 @@ def test_verified_backup_round_trips_preferences_and_learning_records(tmp_path):
     with sqlite3.connect(backup) as connection:
         assert connection.execute("SELECT settings_json FROM user_preferences").fetchone() == ('{"timezone": "UTC"}',)
         assert connection.execute("SELECT note FROM learning_fixture").fetchone() == ("saved answer",)
+
+
+def test_backup_round_trips_populated_current_practice_records(tmp_path):
+    """A supported-schema backup reopens current practice records after restore."""
+    source = Database(tmp_path / "source")
+    import_bank(source, validate_bank())
+    practice = Practice(source, answer_limit=8_000)
+    item = practice.today("Europe/London").selections[0].item
+    practice.submit(
+        item.id, "A saved answer included in the backup.", expected_version=0,
+        resolve_settings=lambda _connection: ("Europe/London", None),
+    )
+
+    restored = Database(tmp_path / "restored")
+    restored.restore_backup(source.create_backup())
+
+    reopened = Practice(restored, answer_limit=8_000)
+    assert reopened.submission(item.id)["request"]["state"] == "awaiting_access"
 
 
 def test_validate_backup_rejects_corrupt_or_newer_database(tmp_path):
@@ -82,6 +101,33 @@ def test_validate_backup_rejects_missing_required_practice_column_and_invalid_ti
         Database.validate_backup(valid)
 
 
+def test_validate_backup_rejects_records_outside_the_supported_application_contract(tmp_path):
+    """A restorable backup includes usable current-schema records, not merely valid SQLite."""
+    source = Database(tmp_path / "source")
+    import_bank(source, validate_bank())
+    practice = Practice(source, answer_limit=8_000)
+    practice.today("Europe/London")
+
+    missing_column = source.create_backup()
+    with sqlite3.connect(missing_column) as connection:
+        connection.execute("ALTER TABLE grading_requests DROP COLUMN latency_ms")
+    with pytest.raises(BackupError, match="valid Daily ML backup"):
+        Database.validate_backup(missing_column)
+
+    invalid_preferences = source.create_backup()
+    with sqlite3.connect(invalid_preferences) as connection:
+        connection.execute("UPDATE user_preferences SET settings_json = ?", ('{"timezone": null}',))
+    with pytest.raises(BackupError, match="valid Daily ML backup"):
+        Database.validate_backup(invalid_preferences)
+
+    invalid_snapshot = source.create_backup()
+    with sqlite3.connect(invalid_snapshot) as connection:
+        connection.execute("DROP TRIGGER practice_snapshot_immutable")
+        connection.execute("UPDATE practice_items SET snapshot_json = ?", ("{not json}",))
+    with pytest.raises(BackupError, match="valid Daily ML backup"):
+        Database.validate_backup(invalid_snapshot)
+
+
 def test_restore_keeps_pre_restore_copy_and_replaces_database_atomically(tmp_path):
     """Stopped-app restore preserves rollback material before replacing live data."""
     data_dir = tmp_path / "Live Data"
@@ -122,7 +168,14 @@ def test_restore_rolls_back_when_final_durability_check_fails(tmp_path, monkeypa
         live.restore_backup(backup)
 
     assert Database(live.path.parent).get_preferences().values == {"timezone": "Europe/London"}
-    assert list(live.backup_dir.glob("daily-ml-pre-restore-*.sqlite3"))
+    [pre_restore] = live.backup_dir.glob("daily-ml-pre-restore-*.sqlite3")
+    assert live.path.stat().st_ino != pre_restore.stat().st_ino
+    restored = Database(live.path.parent)
+    restored.save_preferences({"timezone": "UTC"}, expected_version=1)
+    with sqlite3.connect(pre_restore) as connection:
+        assert connection.execute("SELECT settings_json FROM user_preferences").fetchone() == (
+            '{"timezone": "Europe/London"}',
+        )
 
 
 def test_restore_rejects_foreign_key_violation_without_changing_live_data(tmp_path):

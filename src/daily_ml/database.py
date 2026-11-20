@@ -16,16 +16,61 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 SQLITE_WAIT_SECONDS = 3
 BACKUP_SCHEMA_VERSION = 1
 
-# Columns read by the current Practice service. A manifest records which
-# durable tables exist; these checks prevent an older/core-only manifest from
-# admitting a truncated database that still names a current practice table.
+# Columns required by each durable table in the currently supported schema.
+# The manifest records installed tables, so unknown additive tables from a
+# future compatible application release remain permitted. This contract only
+# rejects a backup that claims a known table but removed a field current code
+# reads or writes.
 _REQUIRED_TABLE_COLUMNS = {
+    "bank_question_versions": {"question_id", "version", "section_id", "concept_id", "retired", "record_json"},
+    "bank_sections": {"id", "domain_id", "title", "position"},
+    "concept_review_state": {"concept_id", "stage", "evidence_due_date"},
+    "grading_action_keys": {"action_key", "request_id"},
+    "grading_requests": {
+        "id", "kind", "model_id", "state", "created_at", "finished_at", "retry_of", "schema_mode",
+        "prompt_version", "schema_version", "context_json", "feedback_json", "grade", "error",
+        "response_id", "usage_json", "latency_ms",
+    },
+    "model_attempts": {"request_id", "sent_at"},
+    "model_rate_limit_retries": {"request_id", "sent_at"},
+    "practice_clarification_drafts": {"request_id", "text", "version"},
+    "practice_credits": {"question_id", "local_date", "item_id"},
+    "practice_days": {"local_date", "timezone", "created_at"},
+    "practice_dispute_reassessment_actions": {"action_key", "dispute_id", "request_id"},
+    "practice_dispute_reassessments": {"request_id", "dispute_id"},
+    "practice_disputes": {
+        "id", "item_id", "target_request_id", "target_version_id", "role", "objection", "opened_at",
+        "resolved_at", "selected_request_id",
+    },
+    "practice_gap_actions": {"action_key", "item_id"},
+    "practice_gap_completions": {"item_id", "completed_at", "completed_date", "completed_timezone"},
+    "practice_grading_versions": {"request_id", "version_id"},
+    "practice_help_events": {"item_id", "kind", "viewed_at"},
     "practice_items": {
         "id", "local_date", "timezone", "created_at", "question_id", "question_version",
         "section_id", "section_title", "snapshot_json", "draft_text", "draft_version",
         "last_practised_date",
     },
+    "practice_revision_drafts": {"request_id", "text", "version"},
+    "practice_revisions": {"item_id", "initial_request_id", "current_request_id"},
+    "practice_selections": {"local_date", "slot", "kind", "item_id", "question_id"},
+    "practice_submission_support": {"item_id", "supported"},
+    "practice_submission_versions": {
+        "id", "item_id", "ordinal", "role", "kind", "parent_version_id", "text", "supported", "created_at",
+    },
+    "practice_submissions": {
+        "item_id", "original_text", "completed_at", "completed_date", "completed_timezone", "original_request_id",
+        "current_request_id",
+    },
+    "review_evidence": {
+        "id", "original_item_id", "grading_request_id", "concept_id", "submitted_at", "submitted_date", "grade",
+        "supported", "accepted_date",
+    },
+    "review_evidence_selection": {"original_item_id", "evidence_id"},
+    "review_sooner_requests": {"idempotency_key", "concept_id", "requested_at", "due_date"},
 }
+
+_EDITABLE_PREFERENCE_KEYS = {"timezone", "model_id"}
 
 
 class PreferenceConflict(RuntimeError):
@@ -34,6 +79,35 @@ class PreferenceConflict(RuntimeError):
 
 class BackupError(RuntimeError):
     """A backup cannot be created, verified, or safely restored."""
+
+
+def validate_editable_preferences(values: dict[str, object]) -> None:
+    """Validate the complete persisted editable-preferences record.
+
+    Parameters
+    ----------
+    values : dict[str, object]
+        The JSON object persisted in ``user_preferences``.
+
+    Raises
+    ------
+    ValueError
+        If a preference is unsupported or has a value the settings layer cannot use.
+    """
+    if values.keys() - _EDITABLE_PREFERENCE_KEYS:
+        raise ValueError("unsupported preference key")
+    if "timezone" in values:
+        timezone = values["timezone"]
+        try:
+            if not isinstance(timezone, str) or not 0 < len(timezone) <= 128 or "\0" in timezone:
+                raise ValueError
+            ZoneInfo(timezone)
+        except (ValueError, ZoneInfoNotFoundError):
+            raise ValueError("timezone") from None
+    if "model_id" in values:
+        model_id = values["model_id"]
+        if not isinstance(model_id, str) or not model_id.strip() or len(model_id) > 256:
+            raise ValueError("model_id")
 
 
 @dataclass(frozen=True)
@@ -119,16 +193,17 @@ class Database:
             if not required <= recorded_tables or not recorded_tables <= tables:
                 raise ValueError
             for table, required_columns in _REQUIRED_TABLE_COLUMNS.items():
-                if table in tables:
+                if table in recorded_tables:
                     columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
                     if not required_columns <= columns:
                         raise ValueError
             preferences = json.loads(row[1])
-            timezone = preferences.get("timezone")
-            if timezone is not None:
-                if not isinstance(timezone, str) or not 0 < len(timezone) <= 128 or "\0" in timezone:
-                    raise ValueError
-                ZoneInfo(timezone)
+            validate_editable_preferences(preferences)
+            if "practice_items" in recorded_tables:
+                from .bank import parse_question_snapshot
+
+                for snapshot, in connection.execute("SELECT snapshot_json FROM practice_items"):
+                    parse_question_snapshot(snapshot)
         except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError, ZoneInfoNotFoundError):
             raise BackupError("The selected file is not a valid Daily ML backup.") from None
 
@@ -265,6 +340,7 @@ class Database:
         """
         self.validate_backup(backup)
         staging = self.path.with_name(f".{self.path.name}.{uuid4().hex}.restore-preparing")
+        rollback = self.path.with_name(f".{self.path.name}.{uuid4().hex}.restore-rollback")
         pre_restore: Path | None = None
         replaced = False
         try:
@@ -278,6 +354,8 @@ class Database:
             pre_restore = self.backup_dir / f"daily-ml-pre-restore-{timestamp}-{uuid4().hex}.sqlite3"
             self._backup_to(pre_restore)
             self._settle_live_sidecars()
+            os.link(self.path, rollback)
+            self._fsync(rollback)
             os.replace(staging, self.path)
             replaced = True
             self._fsync(self.path)
@@ -289,7 +367,7 @@ class Database:
             except OSError:
                 pass
             if replaced and pre_restore is not None:
-                if self._restore_pre_replace_state(pre_restore):
+                if self._restore_pre_replace_state(rollback):
                     raise BackupError(
                         "Restore could not complete after replacing the database; the verified pre-restore "
                         "copy was atomically rolled back and remains in backups."
@@ -309,6 +387,11 @@ class Database:
                 "Could not complete restore. The verified pre-restore copy is retained in backups; "
                 "check disk space and permissions before retrying."
             ) from None
+        finally:
+            try:
+                rollback.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _settle_live_sidecars(self) -> None:
         """Checkpoint WAL data before an atomic live-file replacement."""
@@ -321,11 +404,9 @@ class Database:
             if journal_mode != ("delete",):
                 raise BackupError("SQLite could not safely settle its journal before restore.")
 
-    def _restore_pre_replace_state(self, pre_restore: Path) -> bool:
+    def _restore_pre_replace_state(self, rollback: Path) -> bool:
         """Try to atomically return the verified pre-restore data to the live path."""
-        rollback = self.path.with_name(f".{self.path.name}.{uuid4().hex}.restore-rollback")
         try:
-            os.link(pre_restore, rollback)
             self._fsync(rollback)
             os.replace(rollback, self.path)
             self._fsync(self.path)
@@ -333,11 +414,6 @@ class Database:
             return True
         except (OSError, sqlite3.Error, BackupError):
             return False
-        finally:
-            try:
-                rollback.unlink(missing_ok=True)
-            except OSError:
-                pass
 
     @contextmanager
     def connect(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:

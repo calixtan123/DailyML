@@ -338,6 +338,31 @@ def _validate_record(model: type[_Record], data: object, label: str) -> _Record:
         raise BankError(f"{label}: {' | '.join(failures)}") from None
 
 
+def parse_question_snapshot(snapshot_json: str) -> _Question:
+    """Parse one persisted immutable question snapshot using the bank contract.
+
+    Parameters
+    ----------
+    snapshot_json : str
+        JSON saved with a question version or practice item.
+
+    Returns
+    -------
+    _Question
+        The fully validated question record.
+
+    Raises
+    ------
+    BankError
+        If the snapshot is malformed or cannot form a supported question record.
+    """
+    try:
+        snapshot = json.loads(snapshot_json)
+    except (TypeError, json.JSONDecodeError):
+        raise BankError("saved question snapshot is not valid JSON") from None
+    return _validate_record(_Question, snapshot, "saved question snapshot")
+
+
 def _check_membership(bank: QuestionBank) -> None:
     """Check cross-file membership and the exact reviewed starter allocation."""
     locations = {
