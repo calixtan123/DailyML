@@ -294,6 +294,13 @@ class Database:
         if not required <= tables:
             raise BackupError("The selected file is not a valid Daily ML backup.")
         try:
+            # Startup rebuilds these views in its schema transactions. A table
+            # or index in the same SQLite namespace would prevent that rebuild.
+            if connection.execute("""
+                SELECT 1 FROM sqlite_schema WHERE type IN ('table', 'index')
+                AND name COLLATE NOCASE IN ('bank_active_questions', 'practice_evaluated_requests')
+            """).fetchone():
+                raise ValueError("application view name is occupied")
             row = connection.execute(
                 "SELECT version, settings_json FROM user_preferences WHERE singleton = 1"
             ).fetchone()

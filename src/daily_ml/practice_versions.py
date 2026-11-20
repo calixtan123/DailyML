@@ -54,8 +54,10 @@ _SCHEMA = (
         version INTEGER NOT NULL CHECK (version > 0)
     )
     """,
+    # Views contain no learner records. Refresh their query when opening an older database.
+    "DROP VIEW IF EXISTS practice_evaluated_requests",
     """
-    CREATE VIEW IF NOT EXISTS practice_evaluated_requests AS
+    CREATE VIEW practice_evaluated_requests AS
     SELECT request.*, version.id AS submission_version_id, version.item_id,
            version.role, version.kind AS version_kind, version.parent_version_id,
            version.text AS submitted_text, version.supported, version.ordinal,

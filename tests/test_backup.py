@@ -60,6 +60,49 @@ def test_backup_round_trips_populated_current_practice_records(tmp_path):
         ).fetchone() == original_payload
 
 
+@pytest.mark.parametrize("view, older_projection", [
+    ("bank_active_questions", "SELECT question_id FROM bank_question_versions"),
+    ("practice_evaluated_requests", "SELECT id FROM grading_requests"),
+])
+def test_restored_views_are_rebuilt_from_current_application_schema(tmp_path, view, older_projection):
+    """Startup refreshes derived queries while preserving the records they display."""
+    source = Database(tmp_path / "source")
+    bank = validate_bank()
+    import_bank(source, bank)
+    practice = Practice(source, answer_limit=8_000)
+    item = practice.today("Europe/London").selections[0].item
+    practice.submit(
+        item.id, "My saved answer", expected_version=0,
+        resolve_settings=lambda _connection: ("Europe/London", None),
+    )
+    with source.connect() as connection:
+        connection.execute(f"DROP VIEW {view}")
+        connection.execute(f"CREATE VIEW {view} AS {older_projection}")
+
+    restored = Database(tmp_path / "restored")
+    restored.restore_backup(source.create_backup())
+
+    assert import_bank(restored, bank).inserted == 0
+    reopened = Practice(restored, answer_limit=8_000)
+    assert reopened.submission(item.id)["text"] == "My saved answer"
+
+
+@pytest.mark.parametrize("view", ["bank_active_questions", "practice_evaluated_requests"])
+def test_restore_preserves_original_if_table_occupies_application_view_name(tmp_path, view):
+    """A name conflict cannot be repaired without deleting a table."""
+    source = Database(tmp_path / "source")
+    backup = source.create_backup()
+    with sqlite3.connect(backup) as connection:
+        connection.execute(f"CREATE TABLE {view} (id INTEGER PRIMARY KEY)")
+
+    live = Database(tmp_path / "live")
+    live.save_preferences({"timezone": "Asia/Tokyo"}, expected_version=0)
+    with pytest.raises(BackupError, match="valid Daily ML backup"):
+        live.restore_backup(backup)
+
+    assert live.get_preferences().values == {"timezone": "Asia/Tokyo"}
+
+
 def test_validate_backup_rejects_corrupt_or_newer_database(tmp_path):
     """A damaged or unsupported backup cannot reach the restore path."""
     corrupt = tmp_path / "corrupt.sqlite3"

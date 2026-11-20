@@ -56,8 +56,10 @@ _SCHEMA = (
         PRIMARY KEY (question_id, version)
     )
     """,
+    # Views contain no learner records. Refresh their query when opening an older database.
+    "DROP VIEW IF EXISTS bank_active_questions",
     """
-    CREATE VIEW IF NOT EXISTS bank_active_questions AS
+    CREATE VIEW bank_active_questions AS
     SELECT current.*
     FROM bank_question_versions AS current
     WHERE current.retired = 0 AND NOT EXISTS (
