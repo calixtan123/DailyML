@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { LocalApiError, type LocalRequest } from './api'
+import type { Preferences } from './preferences'
 import { TimezoneSettings } from './TimezoneSettings'
 
 afterEach(cleanup)
@@ -56,5 +57,30 @@ describe('learning preferences', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
     await screen.findByText('Timezone saved.')
     expect(writes).toEqual([{ timezone: 'Asia/Tokyo', version: 0 }, { timezone: 'Asia/Tokyo', version: 1 }])
+  })
+
+  it('waits for the initial preferences read before allowing edits to a catalog-provided timezone', async () => {
+    const fromCatalog: Preferences = {
+      timezone: 'Europe/London', version: 1, source: 'preferences', model_id: 'model-z', model_source: 'preferences',
+    }
+    const newerSettings = { ...fromCatalog, timezone: 'UTC', version: 2 }
+    let completeRead!: (preferences: Preferences) => void
+    const pendingRead = new Promise<Preferences>(resolve => { completeRead = resolve })
+    const request = vi.fn(async (_path: string, options?: RequestInit) => {
+      if (options?.method === 'PUT') return { ...newerSettings, timezone: 'Asia/Tokyo', version: 3 }
+      return pendingRead
+    })
+    render(<TimezoneSettings request={request as LocalRequest} latestPreferences={fromCatalog} />)
+    const zone = screen.getByRole('textbox', { name: 'Learning timezone' })
+    expect(zone).toHaveProperty('value', 'Europe/London')
+    expect(zone).toHaveProperty('readOnly', true)
+
+    completeRead(newerSettings)
+    await screen.findByDisplayValue('UTC')
+    expect(zone).toHaveProperty('readOnly', false)
+    fireEvent.change(zone, { target: { value: 'Asia/Tokyo' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await screen.findByText('Timezone saved.')
+    expect(JSON.parse(String(request.mock.calls[1][1]?.body))).toEqual({ timezone: 'Asia/Tokyo', version: 2 })
   })
 })

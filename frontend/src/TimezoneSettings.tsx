@@ -22,6 +22,7 @@ export function TimezoneSettings({ request, latestPreferences, onPreferencesChan
   const reloadButton = useRef<HTMLButtonElement>(null)
   const errorText = useRef<HTMLParagraphElement>(null)
   const focusZoneOnLoad = useRef(false)
+  const reloadPending = useRef(false)
 
   const settings = latestPreferences && (!loaded || latestPreferences.version > loaded.version)
     ? latestPreferences : loaded
@@ -44,11 +45,16 @@ export function TimezoneSettings({ request, latestPreferences, onPreferencesChan
       focusZoneOnLoad.current = document.activeElement === reloadButton.current
       setLoaded(result)
       onPreferencesChange?.(result)
-      setDraft(previous => previous && { ...previous, version: result.version })
+      if (reloadPending.current) {
+        reloadPending.current = false
+        setDraft(previous => previous && { ...previous, version: result.version })
+      }
       setConflict(false)
       setError('')
     }).catch((failure: unknown) => {
-      if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : 'Could not load settings.')
+      if (controller.signal.aborted) return
+      reloadPending.current = false
+      setError(failure instanceof Error ? failure.message : 'Could not load settings.')
     }).finally(() => {
       if (!controller.signal.aborted) setLoading(false)
     })
@@ -90,7 +96,8 @@ export function TimezoneSettings({ request, latestPreferences, onPreferencesChan
             {!override && <p className="muted" id="timezone-help">Use a timezone name such as Europe/London.</p>}
           </div>
           <div className="actions">
-            <input ref={zoneInput} id="timezone" value={override ? settings.timezone : zone} maxLength={128} readOnly={override || saving}
+            <input ref={zoneInput} id="timezone" value={override ? settings.timezone : zone} maxLength={128}
+              readOnly={override || loading || saving}
               aria-describedby={override ? 'timezone-source' : 'timezone-source timezone-help'} onChange={event => {
                 const next = event.target.value
                 setDraft(previous => ({ zone: next, version: previous?.version ?? settings.version }))
@@ -105,6 +112,7 @@ export function TimezoneSettings({ request, latestPreferences, onPreferencesChan
         <p ref={errorText} className="error" role="alert" tabIndex={-1}>{error}</p>
         <button ref={reloadButton} aria-disabled={loading} onClick={() => {
           if (loading) return
+          reloadPending.current = true
           setLoading(true)
           setLoadVersion(version => version + 1)
         }}>Reload preferences</button>

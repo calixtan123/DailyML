@@ -79,10 +79,11 @@ export function GradingSettings({ request, connected, uncertainAction, onUncerta
   const [draft, setDraft] = useState<{ model: string; version: number }>()
   const [didSave, setDidSave] = useState(false)
   const [revision, setRevision] = useState(0)
+  const [usageRevision, setUsageRevision] = useState(0)
   const [busy, setBusy] = useState(false)
   const action = useRef<AbortController | undefined>(undefined)
   const modelErrorText = useRef<HTMLParagraphElement>(null)
-  const testErrorText = useRef<HTMLParagraphElement>(null)
+  const testErrorText = useRef<HTMLDivElement>(null)
   const focusTestError = useRef(false)
 
   const report = (failure: unknown) => setError(failure instanceof Error ? failure.message : 'Could not load the connection test.')
@@ -143,9 +144,9 @@ export function GradingSettings({ request, connected, uncertainAction, onUncerta
     const controller = new AbortController()
     void request<{attempts_24h: number}>('/api/usage', { signal: controller.signal }).then(reply => {
       if (!controller.signal.aborted) setCount(reply.attempts_24h)
-    }).catch(failure => { if (!controller.signal.aborted) { setCount(undefined); report(failure) } })
+    }).catch(() => { if (!controller.signal.aborted) setCount(undefined) })
     return () => controller.abort()
-  }, [request, job?.id, job?.state, revision])
+  }, [request, job?.id, job?.state, usageRevision])
 
   useEffect(() => {
     if (!job || !pending) return
@@ -272,12 +273,18 @@ export function GradingSettings({ request, connected, uncertainAction, onUncerta
     </div>}
     {job && !job.error && <Result job={job} />}
     {(error || job?.error) && <div className="settings-row">
-      <p ref={testErrorText} role="alert" className="error" tabIndex={-1}>{error || job?.message}</p>
+      <div ref={testErrorText} role="alert" className="error" tabIndex={-1}>
+        {error && <p>{error}</p>}
+        {job?.error && job.message !== error && <p>{job.message}</p>}
+      </div>
       {error && <button disabled={busy} onClick={() => setRevision(r => r + 1)}>Reload connection test</button>}
     </div>}
     <div className="observed-usage">
       <h3>Observed usage</h3>
-      <p aria-live="polite">Model attempts in the last 24 hours: {count ?? 'unavailable'}</p>
+      <div className="settings-row">
+        <p aria-live="polite">Model attempts in the last 24 hours: {count ?? 'unavailable'}</p>
+        <button type="button" onClick={() => setUsageRevision(value => value + 1)}>Refresh observed usage</button>
+      </div>
       <p className="muted">Counts this app’s sends and uncertain attempts, including practice and connection tests, over a rolling UTC window.</p>
     </div>
   </section>

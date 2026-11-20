@@ -80,6 +80,38 @@ describe('grading connection test', () => {
     expect(reads()).toBe(0)
   })
 
+  it('keeps the saved uncertain outcome visible when observed usage cannot be loaded', async () => {
+    const unknown = { ...queued, state: 'outcome_unknown', error: 'outcome_unknown',
+      message: 'The stream was interrupted. The provider may have used a plan request.' }
+    let usageAvailable = false
+    const request = vi.fn(async (path: string, options?: RequestInit) => {
+      if (path.endsWith('/models')) return models
+      if (path.endsWith('/usage')) {
+        if (!usageAvailable) throw new Error('Could not load usage.')
+        return { attempts_24h: 4 }
+      }
+      if (path.endsWith('/test') && options?.method === 'POST') throw new Error('Could not reach the local app.')
+      if (path.endsWith('/test')) return { reference: question, latest: unknown }
+      throw new Error('Unexpected route')
+    })
+    render(<GradingPanel request={request as LocalRequest} />)
+    expect((await screen.findByRole('alert')).textContent).toBe(unknown.message)
+    expect(screen.getByRole('button', { name: 'Retry connection test' })).toHaveProperty('disabled', false)
+    expect(screen.getByText('Model attempts in the last 24 hours: unavailable')).toBeTruthy()
+
+    const requestsBeforeRefresh = request.mock.calls.length
+    usageAvailable = true
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh observed usage' }))
+    expect(await screen.findByText('Model attempts in the last 24 hours: 4')).toBeTruthy()
+    expect(screen.getByRole('alert').textContent).toBe(unknown.message)
+    expect(request.mock.calls.slice(requestsBeforeRefresh).map(([path]) => path)).toEqual(['/api/usage'])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry connection test' }))
+    await screen.findByText('Could not reach the local app.')
+    expect(screen.getByText(unknown.message)).toBeTruthy()
+    expect(document.activeElement).toBe(screen.getByRole('alert'))
+  })
+
   it('recovers the retained test when the previously selected model is no longer available', async () => {
     vi.useFakeTimers()
     const initialAction = { model_id: 'model-z', idempotency_key: 'original-action', retry_of: 'r0' }
