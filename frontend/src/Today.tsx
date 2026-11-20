@@ -672,7 +672,7 @@ export function Today({ request, active, leaveToday }: {
               <>
                 <PracticeFeedback key={editor.item.id} itemId={editor.item.id} request={request} active={active}
                   initial={initialSubmission} answerLimit={session.answer_limit} navigationPending={busy}
-                  leaveEditor={feedbackLeave} onStatus={observeGradingStatus} />
+                  leaveEditor={feedbackLeave} onStatus={observeGradingStatus} onReviewsChanged={requestTodayRefresh} />
                 <SupportControls support={support?.itemId === editor.item.id ? support : undefined}
                   disabled={controlsDisabled} onHelp={revealHelp} />
               </>

@@ -20,6 +20,7 @@ from .database import Database
 from .grading import GradingContext
 from .grading_jobs import enqueue_practice_request, practice_grading_status, public_request
 from .practice_versions import bind_grading_version, initialize_versions, save_answer_version
+from .disputes import disputes_projection, initialize_disputes, register_reassessment, resolve_dispute
 from .scheduling import (
     NEXT_DAY,
     ReviewState,
@@ -327,6 +328,7 @@ class Practice:
                 connection.execute(statement)
             initialize_reviews(connection, self.review_intervals)
             initialize_versions(connection)
+            initialize_disputes(connection)
 
     def _migrate_practice_credits(self, connection: sqlite3.Connection) -> None:
         """Move legacy credit rows to the item-level foreign key schema.
@@ -675,6 +677,101 @@ class Practice:
                 raise PracticeItemNotFound(item_id)
             return self._read_submission(connection, item_id)
 
+    def open_dispute(self, item_id: str, request_id: str, objection: str) -> dict:
+        """Persist an objection and exclude only its original-track evidence.
+
+        Raises
+        ------
+        SubmissionConflict
+            If the displayed assessment is missing, unassessed, or already disputed.
+        """
+        if not objection.strip() or len(objection) > 1600:
+            raise DraftInvalid("Write an objection of at most 1600 characters.")
+        with self.database.connect(immediate=True) as connection:
+            connection.row_factory = sqlite3.Row
+            target = connection.execute("""
+                SELECT assessed.* FROM practice_evaluated_requests AS assessed
+                JOIN practice_submissions AS submission ON submission.item_id = assessed.item_id
+                LEFT JOIN practice_revisions AS revision ON revision.item_id = assessed.item_id
+                WHERE assessed.id = ? AND assessed.item_id = ? AND assessed.state = 'assessed'
+                  AND (assessed.id = submission.current_request_id OR assessed.id = revision.current_request_id)
+            """, (request_id, item_id)).fetchone()
+            if target is None:
+                raise SubmissionConflict("Choose an assessed saved answer to dispute.")
+            if connection.execute("SELECT 1 FROM practice_disputes WHERE target_request_id = ?", (request_id,)).fetchone():
+                raise SubmissionConflict("This assessment already has a dispute.")
+            dispute_id = str(uuid4())
+            connection.execute("""
+                INSERT INTO practice_disputes
+                (id, item_id, target_request_id, target_version_id, role, objection, opened_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (dispute_id, item_id, request_id, target["submission_version_id"], target["role"], objection.strip(),
+                  self._clock().timestamp()))
+            if target["role"] == "original":
+                from .scheduling import select_review_evidence
+                select_review_evidence(connection, item_id, None, self.review_intervals)
+            return self._read_submission(connection, item_id)
+
+    def reassess_dispute(
+        self, item_id: str, dispute_id: str, idempotency_key: str, *,
+        resolve_settings: Callable[[sqlite3.Connection], tuple[str, str | None]],
+    ) -> tuple[dict, str | None]:
+        """Queue or reuse one reassessment of the immutable disputed submission."""
+        with self.database.connect(immediate=True) as connection:
+            connection.row_factory = sqlite3.Row
+            dispute = connection.execute("""
+                SELECT * FROM practice_disputes WHERE id = ? AND item_id = ? AND selected_request_id IS NULL
+            """, (dispute_id, item_id)).fetchone()
+            if dispute is None:
+                raise SubmissionConflict("This dispute is no longer open.")
+            action = connection.execute("""
+                SELECT dispute_id FROM practice_dispute_reassessment_actions WHERE action_key = ?
+            """, (idempotency_key,)).fetchone()
+            if action is not None:
+                if action["dispute_id"] != dispute_id:
+                    raise SubmissionConflict("This reassessment action already belongs to another dispute.")
+                return self._read_submission(connection, item_id), None
+            latest = connection.execute("""
+                SELECT request.* FROM practice_dispute_reassessments AS link
+                JOIN grading_requests AS request ON request.id = link.request_id
+                WHERE link.dispute_id = ? ORDER BY request.created_at DESC, request.rowid DESC LIMIT 1
+            """, (dispute_id,)).fetchone()
+            if latest is not None and (
+                latest["state"] in ("preparing", "in_flight", "assessed")
+                or (latest["state"] == "queued" and latest["error"] is None)
+            ):
+                return self._read_submission(connection, item_id), None
+            _, model_id = resolve_settings(connection)
+            if model_id is None:
+                raise SubmissionConflict("Choose a model in Settings before requesting reassessment.")
+            target = connection.execute("SELECT * FROM practice_evaluated_requests WHERE id = ?", (dispute["target_request_id"],)).fetchone()
+            context = GradingContext.model_validate_json(target["context_json"]).model_copy(update={"objection": dispute["objection"]})
+            request_id = enqueue_practice_request(
+                connection, context, model_id, self._clock().timestamp(), retry_of=latest["id"] if latest else None,
+                mode=self._request_mode(latest or target, model_id),
+            )
+            register_reassessment(connection, dispute_id, request_id)
+            connection.execute(
+                "INSERT INTO practice_dispute_reassessment_actions VALUES (?, ?, ?)",
+                (idempotency_key, dispute_id, request_id),
+            )
+            return self._read_submission(connection, item_id), request_id
+
+    def resolve_dispute(
+        self, item_id: str, dispute_id: str, assessment_request_id: str, *,
+        resolve_settings: Callable[[sqlite3.Connection], tuple[str, str | None]],
+    ) -> dict:
+        """Accept one assessment belonging to an open dispute in one transaction."""
+        with self.database.connect(immediate=True) as connection:
+            try:
+                timezone, _ = resolve_settings(connection)
+                resolve_dispute(
+                    connection, item_id, dispute_id, assessment_request_id, self.review_intervals,
+                    self._clock().timestamp(), timezone,
+                )
+            except LookupError as error:
+                raise SubmissionConflict(str(error)) from None
+            return self._read_submission(connection, item_id)
     def view_help(self, item_id: str, kind: Literal["hint", "explanation"]) -> str:
         """Record help use before returning the selected stored teaching text.
 
@@ -1226,10 +1323,14 @@ class Practice:
             }
             for version in connection.execute("""
                 SELECT r.* FROM practice_evaluated_requests AS r
+                JOIN grading_requests AS request ON request.id = r.id
                 WHERE r.item_id = ? AND NOT EXISTS (
-                    SELECT 1 FROM grading_requests AS child
-                    JOIN practice_grading_versions AS link ON link.request_id = child.id
-                    WHERE child.retry_of = r.id AND link.version_id = r.submission_version_id
+                    SELECT 1 FROM practice_evaluated_requests AS newer
+                    JOIN grading_requests AS newer_request ON newer_request.id = newer.id
+                    WHERE newer.submission_version_id = r.submission_version_id
+                      AND (newer_request.created_at > request.created_at
+                           OR (newer_request.created_at = request.created_at
+                               AND newer_request.rowid > request.rowid))
                 )
                 ORDER BY r.ordinal
             """, (item_id,))
@@ -1245,6 +1346,7 @@ class Practice:
             "versions": versions,
             "revision": revision,
             "revision_draft": revision_draft,
+            "disputes": disputes_projection(connection, item_id),
         }
 
     @staticmethod
@@ -1266,6 +1368,7 @@ class Practice:
             "completed_timezone": completed_timezone,
             "credited": bool(credited),
             "assisted": False,
+            "disputes": [],
             "versions": [],
             "revision": None,
             "revision_draft": None,

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { expect, test } from '@playwright/test'
 
-test('Two tabs complete one original after London midnight and reopen an offline revision the next day',
+test('Two tabs share an original, reopen an offline revision and resolve an assessment dispute',
   async ({ page, context }) => {
     const beforeMidnight = '2026-03-29T22:58:00+00:00'
     const afterMidnight = '2026-03-29T23:01:00+00:00'
@@ -156,6 +156,24 @@ test('Two tabs complete one original after London midnight and reopen an offline
       await expect(article.getByText(revised, { exact: true })).toBeVisible()
       await expect(article.getByText('Grade 3 of 3', { exact: true })).toHaveCount(2)
       await expect(article.getByRole('button', { name: 'Revise answer', exact: true })).toHaveCount(0)
+
+      const originalAttempt = article.getByRole('region', { name: 'Original attempt' })
+      await originalAttempt.getByRole('button', { name: 'Dispute assessment' }).click()
+      const objection = 'The original answer names the held-out evaluation set.'
+      await originalAttempt.getByRole('textbox', { name: 'Your objection' }).fill(objection)
+      await originalAttempt.getByRole('button', { name: 'Open dispute' }).click()
+      await expect(article.getByText('Awaiting accepted assessment', { exact: true })).toBeVisible()
+      await originalAttempt.getByRole('button', { name: 'Request reassessment' }).click()
+      await expect(originalAttempt.getByText('Grade 3 of 3', { exact: true })).toHaveCount(2)
+      await originalAttempt.getByRole('button', { name: 'Accept reassessment' }).click()
+      await expect(originalAttempt.getByText('Reassessment accepted.')).toBeVisible()
+      await expect(article.getByText('Awaiting accepted assessment', { exact: true })).toHaveCount(0)
+      const afterDispute = await (await page.request.post(`${origin}/api/practice/today`, { headers })).json()
+      expect(afterDispute.completion_counts).toEqual(beforeRevision.completion_counts)
+      await page.reload()
+      await submitted.click()
+      await expect(originalAttempt.getByText(objection)).toBeVisible()
+      await expect(originalAttempt.getByText('Reassessment accepted.')).toBeVisible()
     } finally {
       await writeFile(gate, 'cleanup')
       if (child.pid && child.exitCode === null && child.signalCode === null) {
