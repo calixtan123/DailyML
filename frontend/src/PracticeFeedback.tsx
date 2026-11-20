@@ -24,7 +24,7 @@ const REQUEST_LABELS = {
   failed_recoverable: 'Grading needs a retry',
   assessed: 'Grading complete',
 }
-export type GradingStatus = keyof typeof REQUEST_LABELS | 'ready_to_send'
+export type GradingStatus = keyof typeof REQUEST_LABELS | 'ready_to_send' | 'self_reported_gap'
 type GradingRequest = {
   id: string
   state: keyof typeof REQUEST_LABELS
@@ -34,6 +34,15 @@ type GradingRequest = {
   feedback: Feedback | null
   reference: { sources: Record<string, string> }
 }
+type GapRequest = {
+  id: null
+  state: 'self_reported_gap'
+  grade: null
+  can_send: false
+  message: null
+  feedback: null
+  reference: null
+}
 
 export type SavedSubmission = {
   text: string
@@ -41,7 +50,8 @@ export type SavedSubmission = {
   completed_date: string
   completed_timezone: string
   credited: boolean
-  request: GradingRequest
+  assisted?: boolean
+  request: GradingRequest | GapRequest
   clarification_draft: Draft | null
 }
 
@@ -58,6 +68,10 @@ const RECOVERABLE = new Set<GradingRequest['state']>([
 
 function isActive(job: GradingRequest | undefined) {
   return job?.state === 'in_flight' || (job?.state === 'queued' && !job.can_send)
+}
+
+function isGapRequest(job: GradingRequest | GapRequest): job is GapRequest {
+  return job.state === 'self_reported_gap'
 }
 
 function Assessment({ job, feedback }: { job: GradingRequest; feedback: Extract<Feedback, { status: 'assessed' }> }) {
@@ -125,7 +139,9 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
         setView(previous => {
           const draft = previous.submission?.clarification_draft
           const incomingDraft = saved.clarification_draft
-          const sameClarification = previous.submission?.request.id === saved.request.id
+          const sameClarification = !isGapRequest(saved.request)
+            && previous.submission !== undefined && !isGapRequest(previous.submission.request)
+            && previous.submission.request.id === saved.request.id
             && saved.request.feedback?.status === 'needs_clarification' && incomingDraft !== null
           const dirty = previous.edit && previous.edit.text !== previous.edit.base.text
           // Keep the old editor available to copy until the learner discards the local text.
@@ -139,7 +155,7 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
         })
         onStatus(itemId, saved.request.can_send ? 'ready_to_send' : saved.request.state)
         setReadError(false)
-        if (isActive(saved.request)) timer = setTimeout(refresh, POLL_MS)
+        if (!isGapRequest(saved.request) && isActive(saved.request)) timer = setTimeout(refresh, POLL_MS)
       } catch {
         if (!controller.signal.aborted && version === actionVersion.current) setReadError(true)
       }
@@ -206,7 +222,9 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
             {submission.credited ? 'Practice counted on ' : 'This question already counted on '}
             <time dateTime={submission.completed_date}>{submission.completed_date}</time> ({submission.completed_timezone}).
           </p>
-          {job.feedback?.status === 'assessed' ? <Assessment job={job} feedback={job.feedback} /> : (
+          {isGapRequest(job) ? (
+            <p role="status"><strong>Self-reported gap</strong> — no answer was sent for AI grading.</p>
+          ) : job.feedback?.status === 'assessed' ? <Assessment job={job} feedback={job.feedback} /> : (
             <>
               <p role="status"><strong>{REQUEST_LABELS[job.state]}</strong></p>
               {job.message && <p>{job.message}</p>}
@@ -239,11 +257,12 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
               )}
             </>
           )}
+          {submission.assisted && <p className="muted">Assisted practice — help was viewed before this answer was submitted.</p>}
           <details open={!job.feedback || undefined}>
             <summary>Original answer</summary>
             <p className="practice-original">{submission.text}</p>
           </details>
-          {submission.assessed_text !== submission.text && (
+          {!isGapRequest(job) && submission.assessed_text !== submission.text && (
             <details>
               <summary>Most recently sent answer</summary>
               <p className="practice-original">{submission.assessed_text}</p>
