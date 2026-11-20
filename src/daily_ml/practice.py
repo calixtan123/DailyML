@@ -961,6 +961,10 @@ class Practice:
                    ON CONFLICT(question_id, local_date) DO NOTHING""",
                 (question_id, day.local_date, item_id),
             )
+            connection.execute(
+                "UPDATE practice_items SET last_practised_date = ? WHERE id = ?",
+                (day.local_date, item_id),
+            )
             record_gap(connection, item_id, day.timestamp, day.local_date, self.review_intervals)
             connection.execute(
                 "INSERT INTO practice_gap_actions VALUES (?, ?)", (idempotency_key, item_id)

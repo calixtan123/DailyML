@@ -177,7 +177,8 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
   const [copyStatus, setCopyStatus] = useState('')
   const [browsing, setBrowsing] = useState(false)
   const [initialSubmission, setInitialSubmission] = useState<SavedSubmission>()
-  const openedResume = useRef<string | undefined>(undefined)
+  const [openedResume, setOpenedResume] = useState<string>()
+  const resumePending = !!resumeItemId && openedResume !== resumeItemId
 
   const [support, setSupport] = useState<SupportView>()
   const feedbackLeave = useRef<LeaveEditor | null>(null)
@@ -219,8 +220,10 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
     return submitted.some(({ grading_status }) => grading_status === 'queued' || grading_status === 'in_flight')
   })
 
+  const isResumePending = useEffectEvent(() => resumePending)
+
   useEffect(() => {
-    if (!active || !resumeItemId) openedResume.current = undefined
+    if (!active || !resumeItemId) setOpenedResume(undefined)
     if (!active) return
     const controller = new AbortController()
     let loading = false
@@ -236,7 +239,7 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
       const priorStatus = lastStatus.current
       try {
         let today = await request<Session>('/api/practice/today', { method: 'POST', signal: controller.signal })
-        const target = resumeItemId && openedResume.current !== resumeItemId
+        const target = resumeItemId && isResumePending()
           ? await request<PracticeItem>(`/api/practice/items/${resumeItemId}`, { signal: controller.signal })
           : undefined
         if (controller.signal.aborted || version !== operationVersion.current) return
@@ -247,7 +250,7 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
         setSession(today)
         setLoadError(false)
         if (target) {
-          openedResume.current = target.id
+          setOpenedResume(target.id)
           showResumedItem(target)
           return
         }
@@ -547,16 +550,19 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
     today: session.local_date, byConcept: session.reviews ?? {},
   }
 
+  const loadFeedback = loadError ? (
+    <div className="panel today-load-error">
+      <p role="alert">Could not load today’s saved practice.</p>
+      <button type="button" onClick={retryToday}>Retry loading</button>
+    </div>
+  ) : (resumePending || !session) && <p className="panel" role="status">Loading saved practice…</p>
+
+  if (resumePending) return <><h1>Today</h1>{loadFeedback}</>
+
   return (
     <>
       <h1>Today</h1>
-      {!session && !loadError && <p className="panel" role="status">Loading saved practice…</p>}
-      {loadError && (
-        <div className="panel today-load-error">
-          <p role="alert">Could not load today’s saved practice.</p>
-          <button type="button" onClick={retryToday}>Retry loading</button>
-        </div>
-      )}
+      {loadFeedback}
       {session && (
         <PracticeCalendar localDate={session.local_date} firstUseDate={session.first_use_date}
           counts={session.completion_counts} goal={session.goal} />

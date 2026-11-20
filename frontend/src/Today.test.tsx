@@ -111,6 +111,32 @@ afterEach(() => {
 })
 
 describe('Today practice editor', () => {
+  it('hides the retained editor until the requested history item loads', async () => {
+    const target = item('12345678-1234-4321-8123-123456789abc', 'Saved history question', 'Saved history draft.', 2)
+    let resolveItem: ((response: Response) => void) | undefined
+    practiceApi(undefined, undefined, path => {
+      if (path === `/api/practice/items/${target.id}`) {
+        return new Promise(resolve => { resolveItem = resolve })
+      }
+      throw new Error(`Unexpected request ${path}`)
+    })
+    render(<App />)
+    await screen.findByRole('textbox', { name: 'Your answer' })
+    fireEvent.click(screen.getByRole('link', { name: 'Settings' }))
+    await screen.findByRole('heading', { name: 'Settings' })
+
+    await act(async () => {
+      window.history.pushState(null, '', `#/today/${target.id}`)
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    })
+    await waitFor(() => expect(resolveItem).toBeDefined())
+    expect(screen.queryByRole('textbox', { name: 'Your answer' })).toBeNull()
+
+    await act(async () => resolveItem?.(Response.json(target)))
+    expect(await screen.findByRole('textbox', { name: 'Your answer' }))
+      .toHaveProperty('value', 'Saved history draft.')
+  })
+
   it('reveals persisted help only after the server acknowledges it and keeps an edited answer on failure', async () => {
     let resolveHelp: ((response: Response) => void) | undefined
     const { fetch } = practiceApi(undefined, undefined, (path, options) => {

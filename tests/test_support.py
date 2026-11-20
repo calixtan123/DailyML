@@ -204,6 +204,12 @@ def test_gap_uses_the_date_explanation_is_acknowledged(database):
     assert result.submission["completed_date"] == "2026-11-17"
     assert result.today.completion_counts == {"2026-11-17": 1}
 
+    with database.connect() as connection:
+        recency = connection.execute(
+            "SELECT last_practised_date FROM practice_items WHERE id = ?", (item.id,),
+        ).fetchone()
+    assert recency == ("2026-11-17",)
+
 
 def test_gap_retry_after_day_rollover_reuses_completion_and_prepares_today(database):
     practice = service(database)
