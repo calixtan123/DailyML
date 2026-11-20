@@ -157,6 +157,12 @@ class GradingJobs:
                           WHERE kind='connection_test' AND state IN ('queued','preparing')""", (self.clock(),))
             db.execute("""UPDATE grading_requests SET state='queued', error='unsent'
                           WHERE kind='practice' AND state IN ('queued','preparing')""")
+            # Evaluation work is explicitly resumed by its locked CLI invocation. Unlike an
+            # in-flight request, a preparing request has no pre-send reservation and is safe to
+            # return to the queue after a process crash.
+            db.execute("""UPDATE grading_requests SET state='queued', error=NULL, finished_at=NULL
+                          WHERE kind='evaluation' AND state='preparing'
+                          AND NOT EXISTS (SELECT 1 FROM model_attempts WHERE request_id=grading_requests.id)""")
 
     def enqueue_connection_test(self, idempotency_key: str, model_id: str, *, retry_of: str | None = None) -> dict:
         """Save a reference test or reuse a previous click or active test.
