@@ -89,7 +89,7 @@ describe('ChatGPT connection controls', () => {
     })
     render(<ConnectionSettings request={request} />)
     await screen.findByText('Reconnect required')
-    expect(screen.getByRole('button', { name: 'Continue with ChatGPT' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Reconnect ChatGPT' })).toBeTruthy()
     expect(screen.queryByText('ChatGPT plan use authorized')).toBeNull()
   })
 
@@ -199,7 +199,9 @@ describe('ChatGPT connection controls', () => {
 
     api.spy.mockRejectedValueOnce(new Error('Sign-out could not finish.'))
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
-    expect((await screen.findByRole('alert')).textContent).toContain('Sign-out could not finish.')
+    const error = await screen.findByRole('alert')
+    expect(error.textContent).toContain('Sign-out could not finish.')
+    expect(document.activeElement).toBe(error)
     await act(async () => { fireEvent(window, new Event('focus')) })
     expect(screen.getByText('Connected')).toBeTruthy()
     expect(screen.getByText('ChatGPT plan use authorized')).toBeTruthy()

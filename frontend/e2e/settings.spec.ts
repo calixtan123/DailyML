@@ -181,6 +181,8 @@ test('The installed app saves practice drafts and preserves Settings and sign-in
       await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible()
       await expect(page).toHaveTitle('Settings · Daily ML Practice')
       await expect(page.getByText('Signed out', { exact: true })).toBeVisible()
+      await expect(page.getByText('No model selected')).toBeVisible()
+      await expect(page.getByText('Configuration order')).toBeVisible()
       for (const width of [1440, 1024, 768, 390, 320]) {
         await page.setViewportSize({ width, height: 900 })
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
@@ -217,6 +219,69 @@ test('The installed app saves practice drafts and preserves Settings and sign-in
       await expect(page.getByText('Timezone saved.')).toBeVisible()
       await page.reload()
       await expect(timezone).toHaveValue('UTC')
+
+      const oldModel = `retired-${'long-model-id-'.repeat(12)}old`
+      const replacement = { slug: 'available-model', display_name: 'Available model' }
+      let models = [{ slug: oldModel, display_name: 'Retired model' }, replacement]
+      let selected = oldModel
+      let version = 1
+      const writes: { model_id: string; version: number }[] = []
+      const currentSettings = () => ({ timezone: 'UTC', source: 'preferences', version,
+        model_id: selected, model_source: 'preferences' })
+      const selection = () => ({ selected, version, overridden: false, source: 'preferences', settings: currentSettings() })
+
+      await page.route('**/api/connection', route => route.fulfill({ json: {
+        state: 'connected', email: 'offline@example.test', plan_authorized: true, access_token_usable: true,
+        reauthorization_required: false, message: null, remote_revocation_unconfirmed: false, requires_consent: false,
+      } }))
+      await page.route('**/api/settings', route => route.fulfill({ json: currentSettings() }))
+      await page.route('**/api/connection/models', route => route.fulfill({ json: { models, ...selection() } }))
+      await page.route('**/api/connection/model', route => {
+        const edit = route.request().postDataJSON()
+        writes.push(edit)
+        if (writes.length === 1) {
+          version++
+          return route.fulfill({ status: 409, json: { detail: 'Preferences changed in another tab.' } })
+        }
+        selected = edit.model_id
+        version++
+        return route.fulfill({ json: selection() })
+      })
+
+      await page.setViewportSize({ width: 320, height: 820 })
+      await page.reload()
+      const model = page.getByRole('combobox', { name: 'Grading model' })
+      const refresh = page.getByRole('button', { name: 'Refresh model catalog' })
+      const saveModel = page.getByRole('button', { name: 'Save model' })
+      const alert = page.getByRole('alert')
+      const run = page.getByRole('button', { name: 'Run connection test' })
+      await expect(model).toHaveValue(oldModel)
+      models = [replacement]
+      await refresh.press('Enter')
+      await expect(alert).toContainText('is unavailable in this account.')
+      await expect(refresh).toBeFocused()
+      await expect(run).toBeDisabled()
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320)
+      await page.keyboard.press('Tab')
+      await expect(model).toBeFocused()
+      await model.selectOption(replacement.slug)
+      expect(writes).toEqual([])
+      await page.keyboard.press('Tab')
+      await expect(saveModel).toBeFocused()
+      await page.keyboard.press('Enter')
+      await expect(alert).toHaveText('Preferences changed in another tab.')
+      await expect(alert).toBeFocused()
+      await expect(saveModel).toBeDisabled()
+
+      await refresh.press('Enter')
+      await expect(model).toHaveValue('')
+      await model.selectOption(replacement.slug)
+      await saveModel.press('Enter')
+      await expect(page.getByText('Model saved.')).toBeVisible()
+      await expect(page.getByText(replacement.slug, { exact: true })).toBeVisible()
+      await expect(run).toBeEnabled()
+      await expect(page.getByText('Model attempts in the last 24 hours: 0')).toBeVisible()
+      expect(writes).toEqual([{ model_id: replacement.slug, version: 1 }, { model_id: replacement.slug, version: 2 }])
 
       await page.getByRole('link', { name: 'Today', exact: true }).click()
       await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible()

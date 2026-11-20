@@ -80,3 +80,11 @@ def test_preference_conflict_preserves_first_saved_value(tmp_path):
     latest = load_settings(environ={"DML_DATA_DIR": str(tmp_path)})
     assert latest.preferences.version == 1
     assert latest.timezone == "UTC"
+
+
+def test_model_override_rejects_control_characters_without_echoing_value(tmp_path):
+    """Prevent invalid provider IDs and control characters from reaching runtime metadata."""
+    invalid = "would-appear-in-logs\nprivate-line"
+    with pytest.raises(ConfigError, match="model_id") as error:
+        load_settings(environ={"DML_DATA_DIR": str(tmp_path), "DML_MODEL_ID": invalid})
+    assert "private-line" not in str(error.value)

@@ -44,11 +44,13 @@ export function ConnectionSettings({ request, onGradingAccount }: {
   const [actionError, setActionError] = useState<string>()
   const [launchPath, setLaunchPath] = useState('')
   const refreshStatus = useRef<(() => void) | null>(null)
+  const errorText = useRef<HTMLParagraphElement>(null)
 
   const phase = lastStatus?.state
   const status = statusError === undefined ? lastStatus : undefined
   const gradingAccount = status && (status.plan_authorized && !status.reauthorization_required ? status.email : null)
   useEffect(() => { onGradingAccount?.(gradingAccount) }, [onGradingAccount, gradingAccount])
+  useEffect(() => { if (actionError) errorText.current?.focus() }, [actionError])
   useEffect(() => {
     if (busy) return
 
@@ -180,7 +182,8 @@ export function ConnectionSettings({ request, onGradingAccount }: {
             <>
               {status && (!status.plan_authorized || status.reauthorization_required) && (
                 <button className="chatgpt-button" data-oai-siwc-button="" disabled={busy} onClick={() => void signIn()}>
-                  {status.requires_consent ? 'Enable ChatGPT plan use' : 'Continue with ChatGPT'}
+                  {status.requires_consent ? 'Enable ChatGPT plan use' :
+                    status.reauthorization_required ? 'Reconnect ChatGPT' : 'Continue with ChatGPT'}
                 </button>
               )}
               {hasAccount && <button disabled={busy} onClick={() => void finish('sign-out')}>Sign out</button>}
@@ -191,13 +194,14 @@ export function ConnectionSettings({ request, onGradingAccount }: {
           )}
         </div>
       </div>
-      {error && <p className="error" role="alert">{error}</p>}
+      {error && <p ref={errorText} className="error" role="alert" tabIndex={-1}>{error}</p>}
       {status?.remote_revocation_unconfirmed && (
         <p className="notice" role="status">Remote revocation could not be confirmed. You can disconnect the app in ChatGPT.</p>
       )}
       <div className="privacy">
         <h3>Plan usage and privacy</h3>
         <p>Eligible grading requests will use your ChatGPT plan or credits if you allow them. Signing out keeps your local learning data. A grading request already sent may still finish.</p>
+        <p>Other ChatGPT and Codex activity can share this allowance. Use your ChatGPT settings to set connected-app limits or turn off additional credit use.</p>
         <ul className="control-links">
           <li><a href="https://chatgpt.com/settings/usage" target="_blank" rel="noreferrer">Manage usage and credits <ExternalLink size={14} aria-hidden="true" /></a></li>
           <li><a href="https://help.openai.com/en/articles/7730893-data-controls-in-chatgpt" target="_blank" rel="noreferrer">Data controls <ExternalLink size={14} aria-hidden="true" /></a></li>

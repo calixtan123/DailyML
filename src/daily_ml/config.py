@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -14,6 +15,9 @@ from .database import Database, Preferences
 
 EDITABLE = {"timezone", "model_id"}
 TEXT_KEYS = {"data_dir", "timezone", "model_id"}
+MODEL_ID_PATTERN = r"^[A-Za-z0-9._:/-]+$"
+MODEL_ID_MAX_LENGTH = 256
+OVERRIDE_SOURCES = ("installation", "environment")
 MAX_REVIEW_INTERVAL_DAYS = (date.max - date.min).days
 
 
@@ -51,10 +55,29 @@ class Settings:
             Effective timezone and its configuration source.
         """
         source = self.sources["timezone"]
-        if source in ("installation", "environment"):
+        if source in OVERRIDE_SOURCES:
             return self.timezone, source
         timezone = preferences.values.get("timezone")
         return (str(timezone), "preferences") if timezone else (self.default_timezone, "default")
+
+    def effective_model(self, preferences: Preferences) -> tuple[str | None, str]:
+        """Resolve the grading model using the caller's latest saved preferences.
+
+        Parameters
+        ----------
+        preferences : Preferences
+            Snapshot from the caller's read or write transaction.
+
+        Returns
+        -------
+        tuple
+            The selected model ID, or None, and its configuration source.
+        """
+        source = self.sources["model_id"]
+        if source in OVERRIDE_SOURCES:
+            return self.model_id, source
+        model = preferences.values.get("model_id")
+        return (str(model), "preferences") if model else (None, "default")
 
 
 @dataclass(frozen=True)
@@ -112,7 +135,8 @@ def _validate(values: dict[str, object], allowed: set[str]) -> None:
             raise _error("timezone") from None
     if "model_id" in values:
         model = values["model_id"]
-        if not isinstance(model, str) or not model.strip() or len(model) > 256:
+        if (not isinstance(model, str) or len(model) > MODEL_ID_MAX_LENGTH
+                or not re.fullmatch(MODEL_ID_PATTERN, model)):
             raise _error("model_id")
     for key, minimum, maximum in (("answer_limit", 1, None), ("port", 0, 65535)):
         if key in values:
