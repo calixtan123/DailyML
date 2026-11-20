@@ -72,6 +72,53 @@ _REQUIRED_TABLE_COLUMNS = {
 
 _EDITABLE_PREFERENCE_KEYS = {"timezone", "model_id"}
 
+# Keys and relationships used by current application writes. These supplement
+# the durable column contract above: SQLite accepts a table rebuilt without a
+# unique key or foreign key, but normal ``ON CONFLICT`` writes may then fail.
+_REQUIRED_UNIQUE_KEYS = {
+    "bank_sections": (frozenset({"id"}),),
+    "bank_question_versions": (frozenset({"question_id", "version"}),),
+    "practice_days": (frozenset({"local_date"}),),
+    "practice_items": (frozenset({"id"}), frozenset({"id", "question_id"})),
+    "practice_selections": (
+        frozenset({"local_date", "slot"}),
+        frozenset({"local_date", "question_id"}),
+    ),
+    "practice_credits": (
+        frozenset({"question_id", "local_date"}),
+        frozenset({"item_id"}),
+    ),
+}
+
+_REQUIRED_FOREIGN_KEYS = {
+    "bank_question_versions": (
+        (frozenset({("section_id", "id")}), "bank_sections"),
+    ),
+    "practice_items": (
+        (frozenset({("local_date", "local_date")}), "practice_days"),
+        (frozenset({("question_id", "question_id"), ("question_version", "version")}), "bank_question_versions"),
+    ),
+    "practice_selections": (
+        (frozenset({("local_date", "local_date")}), "practice_days"),
+        (frozenset({("item_id", "id"), ("question_id", "question_id")}), "practice_items"),
+    ),
+}
+
+# ``practice_credits`` had one supported earlier layout. Startup migrates it
+# transactionally, so a backup remains restorable if it has either identity.
+_PRACTICE_CREDITS_FOREIGN_KEY_LAYOUTS = (
+    frozenset({
+        ("practice_days", frozenset({("local_date", "local_date")})),
+        ("practice_items", frozenset({("item_id", "id")})),
+        ("practice_items", frozenset({("item_id", "id"), ("question_id", "question_id")})),
+    }),
+    frozenset({
+        ("practice_days", frozenset({("local_date", "local_date")})),
+        ("practice_submissions", frozenset({("item_id", "item_id")})),
+        ("practice_items", frozenset({("item_id", "id"), ("question_id", "question_id")})),
+    }),
+)
+
 
 class PreferenceConflict(RuntimeError):
     """Another writer saved a newer preference version."""
@@ -79,6 +126,50 @@ class PreferenceConflict(RuntimeError):
 
 class BackupError(RuntimeError):
     """A backup cannot be created, verified, or safely restored."""
+
+
+def _unique_keys(connection: sqlite3.Connection, table: str) -> set[frozenset[str]]:
+    """Return primary and unique column sets enforced by one SQLite table."""
+    keys: set[frozenset[str]] = set()
+    primary_key = {
+        row[1] for row in connection.execute(f"PRAGMA table_info('{table}')") if row[5] > 0
+    }
+    if primary_key:
+        keys.add(frozenset(primary_key))
+    for _, index_name, unique, _, partial in connection.execute(f"PRAGMA index_list('{table}')"):
+        if unique and not partial:
+            quoted_index_name = index_name.replace("'", "''")
+            columns = {
+                row[2] for row in connection.execute(f"PRAGMA index_info('{quoted_index_name}')")
+            }
+            keys.add(frozenset(columns))
+    return keys
+
+
+def _foreign_keys(connection: sqlite3.Connection, table: str) -> set[tuple[str, frozenset[tuple[str, str]]]]:
+    """Return enforced foreign-key column mappings grouped by referenced table."""
+    grouped: dict[tuple[int, str], set[tuple[str, str]]] = {}
+    for key_id, _, referenced_table, source, target, *_ in connection.execute(
+        f"PRAGMA foreign_key_list('{table}')"
+    ):
+        grouped.setdefault((key_id, referenced_table), set()).add((source, target))
+    return {(referenced_table, frozenset(columns)) for (_, referenced_table), columns in grouped.items()}
+
+
+def _validate_table_contracts(connection: sqlite3.Connection, recorded_tables: set[str]) -> None:
+    """Require SQL keys and relationships relied on by supported durable layouts."""
+    for table, required_keys in _REQUIRED_UNIQUE_KEYS.items():
+        if table in recorded_tables and not set(required_keys) <= _unique_keys(connection, table):
+            raise ValueError("required unique key is missing")
+    for table, requirements in _REQUIRED_FOREIGN_KEYS.items():
+        if table in recorded_tables:
+            foreign_keys = _foreign_keys(connection, table)
+            if any((referenced_table, columns) not in foreign_keys for columns, referenced_table in requirements):
+                raise ValueError("required foreign key is missing")
+    if "practice_credits" in recorded_tables:
+        foreign_keys = frozenset(_foreign_keys(connection, "practice_credits"))
+        if foreign_keys not in _PRACTICE_CREDITS_FOREIGN_KEY_LAYOUTS:
+            raise ValueError("unsupported practice credit relationship layout")
 
 
 def validate_editable_preferences(values: dict[str, object]) -> None:
@@ -197,13 +288,24 @@ class Database:
                     columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
                     if not required_columns <= columns:
                         raise ValueError
+            _validate_table_contracts(connection, recorded_tables)
             preferences = json.loads(row[1])
             validate_editable_preferences(preferences)
+            if "bank_question_versions" in recorded_tables:
+                from .bank import validate_saved_question_versions
+
+                validate_saved_question_versions(connection)
             if "practice_items" in recorded_tables:
                 from .bank import parse_question_snapshot
 
-                for snapshot, in connection.execute("SELECT snapshot_json FROM practice_items"):
-                    parse_question_snapshot(snapshot)
+                for question_id, question_version, section_id, snapshot in connection.execute(
+                    "SELECT question_id, question_version, section_id, snapshot_json FROM practice_items"
+                ):
+                    parsed = parse_question_snapshot(snapshot)
+                    if (parsed.id, parsed.version, parsed.section_id) != (
+                        question_id, question_version, section_id,
+                    ):
+                        raise ValueError("practice snapshot identity does not match its durable row")
         except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError, ZoneInfoNotFoundError):
             raise BackupError("The selected file is not a valid Daily ML backup.") from None
 
@@ -343,6 +445,7 @@ class Database:
         rollback = self.path.with_name(f".{self.path.name}.{uuid4().hex}.restore-rollback")
         pre_restore: Path | None = None
         replaced = False
+        retain_rollback = False
         try:
             with closing(sqlite3.connect(backup.resolve().as_uri() + "?mode=ro", uri=True)) as source, closing(sqlite3.connect(staging)) as target:
                 self._online_backup(source, target)
@@ -367,14 +470,23 @@ class Database:
             except OSError:
                 pass
             if replaced and pre_restore is not None:
-                if self._restore_pre_replace_state(rollback):
+                rollback_state = self._restore_pre_replace_state(rollback)
+                if rollback_state == "verified":
                     raise BackupError(
                         "Restore could not complete after replacing the database; the verified pre-restore "
                         "copy was atomically rolled back and remains in backups."
                     ) from None
+                if rollback_state == "restored_unverified":
+                    raise BackupError(
+                        "Restore could not complete after replacing the database. The original database was "
+                        "atomically put back, but its final durability check could not be confirmed; the verified "
+                        f"pre-restore copy remains at {pre_restore}. Check disk space before reopening Daily ML."
+                    ) from None
+                retain_rollback = True
                 raise BackupError(
-                    "Restore could not complete after replacing the database. The verified pre-restore copy "
-                    f"is retained at {pre_restore}; restore it manually before reopening Daily ML."
+                    "Restore could not complete after replacing the database. The original database remains "
+                    f"staged at {rollback}; while Daily ML is stopped, replace {self.path} with that file manually. "
+                    f"The verified pre-restore copy is also retained at {pre_restore}."
                 ) from None
             if isinstance(error, BackupError):
                 raise
@@ -388,10 +500,11 @@ class Database:
                 "check disk space and permissions before retrying."
             ) from None
         finally:
-            try:
-                rollback.unlink(missing_ok=True)
-            except OSError:
-                pass
+            if not retain_rollback:
+                try:
+                    rollback.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _settle_live_sidecars(self) -> None:
         """Checkpoint WAL data before an atomic live-file replacement."""
@@ -404,16 +517,27 @@ class Database:
             if journal_mode != ("delete",):
                 raise BackupError("SQLite could not safely settle its journal before restore.")
 
-    def _restore_pre_replace_state(self, rollback: Path) -> bool:
-        """Try to atomically return the verified pre-restore data to the live path."""
+    def _restore_pre_replace_state(self, rollback: Path) -> str:
+        """Try to atomically return the verified pre-restore data to the live path.
+
+        Returns
+        -------
+        str
+            ``"verified"`` after durable rollback validation,
+            ``"restored_unverified"`` after the rename succeeds but its final
+            durability check fails, or ``"staged"`` when the original remains
+            at ``rollback`` because the rename cannot complete.
+        """
         try:
-            self._fsync(rollback)
             os.replace(rollback, self.path)
+        except OSError:
+            return "staged"
+        try:
             self._fsync(self.path)
             self.validate_backup(self.path)
-            return True
+            return "verified"
         except (OSError, sqlite3.Error, BackupError):
-            return False
+            return "restored_unverified"
 
     @contextmanager
     def connect(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:

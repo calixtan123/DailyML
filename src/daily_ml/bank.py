@@ -363,6 +363,43 @@ def parse_question_snapshot(snapshot_json: str) -> _Question:
     return _validate_record(_Question, snapshot, "saved question snapshot")
 
 
+def validate_saved_question_versions(connection: Connection, packaged_bank: QuestionBank | None = None) -> None:
+    """Validate persisted immutable question versions against the bank contract.
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Connection to a backup candidate containing ``bank_question_versions``.
+    packaged_bank : QuestionBank or None
+        Validated packaged bank used at application startup. When omitted, the
+        package resources are loaded and validated.
+
+    Raises
+    ------
+    BankError
+        If a stored record is malformed, disagrees with its durable identity
+        columns, or differs from a packaged version with the same identity.
+    """
+    packaged = packaged_bank if packaged_bank is not None else validate_bank()
+    packaged_records = {
+        (question.id, question.version): question.model_dump_json()
+        for question in packaged.questions
+    }
+    rows = connection.execute(
+        """SELECT question_id, version, section_id, concept_id, retired, record_json
+           FROM bank_question_versions"""
+    )
+    for question_id, version, section_id, concept_id, retired, record_json in rows:
+        record = parse_question_snapshot(record_json)
+        if (record.id, record.version, record.section_id, record.concept_id, int(record.retired)) != (
+            question_id, version, section_id, concept_id, retired,
+        ):
+            raise BankError("saved question version identity does not match its durable row")
+        packaged_record = packaged_records.get((question_id, version))
+        if packaged_record is not None and record_json != packaged_record:
+            raise BankError(f"{question_id}: version {version} is immutable; increase version")
+
+
 def _check_membership(bank: QuestionBank) -> None:
     """Check cross-file membership and the exact reviewed starter allocation."""
     locations = {
@@ -486,6 +523,7 @@ def import_bank(database: Database, bank: QuestionBank) -> ImportSummary:
     with database.connect(immediate=True) as connection:
         for statement in _SCHEMA:
             connection.execute(statement)
+        database.record_backup_tables(connection)
         sections = (
             (domain.id, section) for domain in checked.curriculum.domains for section in domain.sections
         )
