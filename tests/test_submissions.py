@@ -692,3 +692,43 @@ def test_today_reopens_each_older_original_with_an_unused_revision(learner):
     with db.connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM practice_credits").fetchone() == (3,)
         assert connection.execute("SELECT COUNT(*) FROM review_evidence").fetchone() == (2,)
+
+
+def test_offline_help_and_gap_api_requires_acknowledgement_and_saves_one_credit(learner):
+    """Exercise protected support controls across a local-day rollover."""
+    client, headers, db, instants = learner
+    item = _today(client, headers)["selections"][0]["item"]
+    path = f"/api/practice/items/{item['id']}"
+    action = {"idempotency_key": "viewed-gap"}
+
+    assert client.post(f"{path}/help/hint").status_code == 403
+    hint = client.post(f"{path}/help/hint", headers=headers)
+    assert hint.status_code == 200
+    assert hint.json()["content"]
+    explanation = client.post(f"{path}/help/explanation", headers=headers)
+    assert explanation.status_code == 200
+    assert explanation.json()["content"] != hint.json()["content"]
+    assert client.post(f"{path}/gap/acknowledge", headers=headers, json=action).status_code == 409
+
+    reveal = client.post(f"{path}/gap/reveal", headers=headers)
+    assert reveal.status_code == 200
+    assert reveal.json()["explanation"] == explanation.json()["content"]
+    assert reveal.json()["acknowledgement_required"] is True
+    assert _today(client, headers)["completion_counts"] == {}
+
+    instants[0] = datetime(2026, 3, 29, 23, 1, tzinfo=UTC)
+    completion = client.post(f"{path}/gap/acknowledge", headers=headers, json=action)
+    replay = client.post(f"{path}/gap/acknowledge", headers=headers, json=action)
+
+    assert completion.status_code == replay.status_code == 200
+    saved = completion.json()["submission"]
+    assert replay.json()["submission"] == saved
+    assert saved["completed_date"] == "2026-03-30"
+    assert saved["request"]["state"] == "self_reported_gap"
+    assert completion.json()["today"]["completion_counts"] == {"2026-03-30": 1}
+    concept_id = item["question"]["concept_id"]
+    assert completion.json()["today"]["reviews"][concept_id]["due_date"] == "2026-03-31"
+    assert client.get(f"{path}/submission").json() == saved
+    assert _submit(client, headers, item["id"], "A competing answer.").status_code == 409
+    with db.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM grading_requests").fetchone() == (0,)

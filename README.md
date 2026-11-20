@@ -6,6 +6,10 @@ Open **Settings** to connect your ChatGPT account, save local preferences and te
 
 Use **Save draft** to keep your work in SQLite. Switching questions also saves any edits. If a save fails, the editor keeps your text and offers retry and copy controls. If another tab saves first, Today shows both versions and asks which to keep. Drafts stay available under **Resume practice** across days and keep their original question even if the bank is updated.
 
+Open the hint or stored explanation when you need help. Using either before submitting marks the answer as **Assisted practice**. You still receive calendar credit and can receive a correctness assessment. The concept returns for review tomorrow after the assessment is accepted. Reading the explanation after submission preserves the answer’s original classification.
+
+Choose **I don’t know** to open the stored explanation, then acknowledge it after reading to finish the item. This records a **Self-reported gap**, earns calendar credit on the day you acknowledge it, and schedules review for tomorrow. Hints, stored explanations, and this completion path work offline and require no grading request. The SQLite backup includes help use and gap completions.
+
 ## Install and run
 
 Building the wheel requires [uv](https://docs.astral.sh/uv/), Python 3.12 or later, and Node 24 (or Node 22.12+). From the checkout, build the frontend and then the wheel.
@@ -39,6 +43,8 @@ When feedback asks for clarification, edit the clarified answer and send it from
 ## Settings and local data
 
 The default directory is `~/Library/Application Support/Daily ML Practice/`. It contains the SQLite database for preferences, imported question versions, saved recommendations, question snapshots and drafts, plus rotating operational logs and a protected `credentials/` directory. A consistent SQLite backup includes the saved practice records. Keep credentials out of SQLite backups. Signing out retains SQLite data and the saved account registration and installation identity.
+
+On the first upgrade to self-reported gaps, the app verifies a private `daily-ml-before-gap-upgrade-*.sqlite3` backup before migrating existing practice credits. If launch reports a local data error during the upgrade, the migration rolls back. Check available space and permissions in the data directory before retrying. Keep the backup if you need to recover the pre-upgrade records.
 
 Configuration loads packaged defaults, saved SQLite preferences, installation TOML, then `DML_` environment overrides. The launcher resolves the data directory before it opens SQLite. Settings shows whether the timezone is controlled by an override.
 

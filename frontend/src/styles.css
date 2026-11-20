@@ -152,6 +152,10 @@ input { background: var(--input); min-width: 0; width: 180px; }
 .practice-feedback h4, .practice-feedback h5 { margin: 12px 0 4px; font-size: 15px; }
 .practice-feedback summary { cursor: pointer; min-height: 44px; padding-block: 10px; color: var(--accent); }
 .practice-original { white-space: pre-wrap; }
+.practice-clarification .actions { margin-top: 8px; }
+.practice-support { display: grid; gap: 10px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.practice-support-content { padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--input); }
+.practice-support-content p + .actions { margin-top: 12px; }
 .today-shortage { margin-bottom: 16px; }
 .today-load-error button { margin-top: 12px; }
 .today-grid { display: grid; grid-template-columns: minmax(0, 1fr) 232px; gap: 24px; align-items: start; }

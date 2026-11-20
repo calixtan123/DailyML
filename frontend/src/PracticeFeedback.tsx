@@ -24,7 +24,7 @@ const REQUEST_LABELS = {
   failed_recoverable: 'Grading needs a retry',
   assessed: 'Grading complete',
 }
-export type GradingStatus = keyof typeof REQUEST_LABELS | 'ready_to_send'
+export type GradingStatus = keyof typeof REQUEST_LABELS | 'ready_to_send' | 'self_reported_gap'
 type GradingRequest = {
   id: string
   state: keyof typeof REQUEST_LABELS
@@ -33,6 +33,15 @@ type GradingRequest = {
   message: string | null
   feedback: Feedback | null
   reference: { sources: Record<string, string> }
+}
+type GapRequest = {
+  id: null
+  state: 'self_reported_gap'
+  grade: null
+  can_send: false
+  message: null
+  feedback: null
+  reference: null
 }
 
 type AnswerTrack = {
@@ -54,7 +63,11 @@ type SubmissionVersion = {
   request: GradingRequest
 }
 
-export type SavedSubmission = AnswerTrack & {
+export type SavedSubmission = Omit<AnswerTrack, 'request' | 'submission_version_id' | 'supported'> & {
+  request: GradingRequest | GapRequest
+  submission_version_id?: string
+  supported?: boolean
+  assisted?: boolean
   text: string
   completed_date: string
   completed_timezone: string
@@ -82,10 +95,10 @@ function followUp({ submission, editingRevision }: FeedbackView): FollowUp | und
   if (!submission) return
   const track = submission.revision ? 'revision' : 'original'
   const answer = submission.revision ?? submission
-  if (answer.request.feedback?.status === 'needs_clarification' && answer.clarification_draft) {
+  if (answer.request.state !== 'self_reported_gap' && answer.request.feedback?.status === 'needs_clarification' && answer.clarification_draft) {
     return { kind: 'clarification', track, requestId: answer.request.id, draft: answer.clarification_draft }
   }
-  if (editingRevision && !submission.revision && submission.revision_draft) {
+  if (submission.request.state !== 'self_reported_gap' && editingRevision && !submission.revision && submission.revision_draft) {
     return { kind: 'revision', track: 'revision', requestId: submission.request.id, draft: submission.revision_draft }
   }
 }
@@ -118,7 +131,7 @@ const RECOVERABLE = new Set<GradingRequest['state']>([
   'awaiting_access', 'awaiting_allowance', 'outcome_unknown', 'failed_recoverable',
 ])
 
-function isActive(job: GradingRequest | undefined) {
+function isActive(job: GradingRequest | GapRequest | undefined) {
   return job?.state === 'in_flight' || (job?.state === 'queued' && !job.can_send)
 }
 
@@ -346,7 +359,12 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
             {submission.credited ? 'Practice counted on ' : 'This question already counted on '}
             <time dateTime={submission.completed_date}>{submission.completed_date}</time> ({submission.completed_timezone}).
           </p>
-          <section className="practice-attempt" aria-labelledby="original-attempt">
+          {original.state === 'self_reported_gap' ? (
+            <>
+              <p role="status"><strong>Self-reported gap</strong> — no answer was sent for AI grading.</p>
+              <AnswerText label="Original answer" text={submission.text} open />
+            </>
+          ) :<section className="practice-attempt" aria-labelledby="original-attempt">
             <h3 id="original-attempt" ref={originalHeading} tabIndex={-1}>Original attempt</h3>
             <AnswerText label="Original answer" text={submission.text} open={Boolean(revision) || original.feedback?.status !== 'assessed'} />
             {submission.assessed_text !== submission.text && (
@@ -355,7 +373,8 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
             <RequestFeedback job={original} disabled={disabled} retry={() => void send(original.id, 'retry')}>
               {editor?.track === 'original' && followUpEditor}
             </RequestFeedback>
-          </section>
+            {submission.assisted && <p className="muted">Assisted practice — help was viewed before this answer was submitted.</p>}
+          </section>}
           {revision && (
             <section className="practice-attempt" aria-labelledby="assisted-revision">
               <h3 id="assisted-revision" ref={revisionHeading} tabIndex={-1}>Assisted revision</h3>
