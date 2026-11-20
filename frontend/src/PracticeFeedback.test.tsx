@@ -5,7 +5,9 @@ import { PracticeFeedback, type SavedSubmission } from './PracticeFeedback'
 
 afterEach(cleanup)
 
-function assessment(id: string, summary: string): SavedSubmission['request'] {
+type Assessment = Extract<SavedSubmission['request'], { id: string }>
+
+function assessment(id: string, summary: string): Assessment {
   return {
     id, state: 'assessed', grade: 2, can_send: false, message: null,
     reference: { sources: {} },
@@ -16,7 +18,7 @@ function assessment(id: string, summary: string): SavedSubmission['request'] {
   }
 }
 
-function initialSubmission(): SavedSubmission {
+function initialSubmission(): SavedSubmission & { request: Assessment } {
   return {
     text: 'Keep a test set.', assessed_text: 'Keep a test set.', completed_date: '2026-11-19',
     completed_timezone: 'Europe/London', credited: true, submission_version_id: 'version',
