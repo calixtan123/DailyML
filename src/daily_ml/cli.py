@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import socket
 import sqlite3
@@ -17,7 +18,11 @@ from .app import LaunchError, create_app, resolve_assets
 from .bank import BankError, validate_bank
 from .config import ConfigError, load_settings, resolve_installation
 from .credentials import StorageError
+from .connection import Connection
+from .database import Database
+from .grader_evaluation import EvaluationRunner, load_fixed_cases
 from .locking import LockBusy, file_lock
+from .provider import Provider
 
 LOOPBACK = "127.0.0.1"
 logger = logging.getLogger(__name__)
@@ -147,12 +152,40 @@ def main(argv: Sequence[str] | None = None) -> int:
     run.add_argument("--config", type=Path, help="Use this installation TOML")
     validate = commands.add_parser("validate-bank", help="Validate the reviewed question bank offline")
     validate.add_argument("--bank-dir", type=Path, help="Read a candidate curriculum and questions directory")
+    evaluate = commands.add_parser("evaluate-grader", help="Run the reviewed fixed grader set using your ChatGPT plan")
+    evaluate.add_argument("--model", required=True, help="Account model to use for the explicit live evaluation")
+    evaluate.add_argument("--config", type=Path, help="Use this installation TOML")
+    evaluate.add_argument("--confirm-reviewed-fixtures", action="store_true",
+                          help="Confirm an independent reviewer checked expected fixture outcomes")
     args = parser.parse_args(argv)
     try:
         if args.command == "validate-bank":
             bank = validate_bank(args.bank_dir)
             section_count = sum(len(domain.sections) for domain in bank.curriculum.domains)
             print(f"Validated {len(bank.questions)} questions across {section_count} sections.")  # CLI output
+            return 0
+        if args.command == "evaluate-grader":
+            if not args.confirm_reviewed_fixtures:
+                parser.exit(2, "Daily ML Practice: pass --confirm-reviewed-fixtures after independent review.\n")
+            installation = resolve_installation(args.config)
+            with own_data_directory(installation.data_dir), _logging(installation.data_dir):
+                settings = load_settings(installation=installation)
+                cases = load_fixed_cases()
+                database = Database(settings.data_dir)
+                connection = Connection(settings.data_dir)
+                try:
+                    runner = EvaluationRunner(database, Provider(connection, timeout=settings.request_timeout), settings)
+                    runner.jobs.recover_interrupted()
+                    print(f"Planned requests: at most {len(cases)} unfinished fixed cases; shared-plan usage may apply.")
+                    summary = asyncio.run(runner.run(args.model, cases=cases))
+                    report = runner.report(summary.run_id, cases=cases)
+                    path = settings.data_dir / f"grader-evaluation-{summary.run_id}.json"
+                    path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                    print(json.dumps({"report": str(path), "completed": summary.completed_count,
+                                      "agreement": summary.agreement_count, "critical_coverage": summary.critical_coverage_count,
+                                      "release_passed": summary.release_passed, "paused": summary.paused_state}, sort_keys=True))
+                finally:
+                    connection.close()
             return 0
         assets = resolve_assets()
         installation = resolve_installation(args.config)

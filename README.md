@@ -45,6 +45,17 @@ When feedback asks for clarification, edit the clarified answer and send it from
 Use **Dispute assessment** on a saved assessed answer to retain its exact evaluated version, feedback, and your objection. An open dispute removes only that original answer's accepted assessment from review scheduling; other accepted evidence and any earlier **Review sooner** request remain. If this leaves no accepted assessment, the concept shows **Awaiting accepted assessment** and stays available for practice. The original completion remains in the calendar.
 
 **Request reassessment** sends that same frozen answer, marking guide, references, support classification, and role through the normal grading and usage path. It sends the objection only for that explicit reassessment. Compare the two assessments, then accept either one or leave the dispute open. Accepting a reassessment selects it for the original answer's review replay; an assisted-revision dispute never changes the original answer's review schedule. Reassessment failures and uncertain results remain saved and can be explicitly requested again. SQLite backup and restore retain open disputes, comparison feedback, and selected resolutions.
+## Fixed grader evaluation
+
+The reviewed fixed evaluator is deliberately separate from normal practice. It contains 18 version-pinned answers from the reviewed starter bank, including correct, incomplete, alternative, clarification, prompt-injection, and critical-misconception cases. Its default pytest coverage is fully offline.
+
+Before a live run, a second reviewer must inspect the fixture expectations and sources. The explicit acknowledgement below prevents an accidental plan-usage request. It makes **at most 18 requests**, and fewer when a previous run has terminal results. Requests use the selected ChatGPT-plan model and may consume shared-plan usage; there is no fallback model or separate daily allowance.
+
+```sh
+daily-ml evaluate-grader --model "your-account-model" --confirm-reviewed-fixtures
+```
+
+The command prints the planned maximum before it sends anything, uses the normal production provider, feedback validation, grade calculation, and durable attempt ledger, and writes a sanitized JSON report into the local data directory. It never writes the fixture answers to operational logs or that report. A run stops on unavailable access, allowance, or an uncertain in-flight result; running the same command again resumes only terminally incomplete cases. An uncertain request is retained for investigation rather than silently resent. A release passes only when all 18 cases finish, at least 16 match the expected range, and every predetermined critical misconception is identified. This small sample is a release gate, not a claim of general grader accuracy.
 
 ## History
 

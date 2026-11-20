@@ -211,6 +211,37 @@ class GradingJobs:
             db.execute("INSERT INTO grading_action_keys VALUES (?,?)", (idempotency_key, request_id))
             return public_request(db.execute("SELECT * FROM grading_requests WHERE id=?", (request_id,)).fetchone())
 
+    def enqueue_evaluation(self, context: GradingContext, model_id: str, *, connection: sqlite3.Connection | None = None) -> str:
+        """Persist one fixed evaluation case before it can be sent.
+
+        Parameters
+        ----------
+        context : GradingContext
+            Immutable reviewed case context, including its fixed answer.
+        model_id : str
+            Account model selected for the explicit evaluation invocation.
+
+        Returns
+        -------
+        str
+            The durable ledger request identifier.
+        """
+        request_id = str(uuid4())
+        def insert(db: sqlite3.Connection) -> None:
+            """Write the evaluation request into the caller's transaction."""
+            db.execute(
+                """INSERT INTO grading_requests
+                   (id,kind,state,model_id,created_at,schema_mode,prompt_version,schema_version,context_json)
+                   VALUES (?,'evaluation','queued',? ,?,'schema',?,?,?)""",
+                (request_id, model_id, self.clock(), PROMPT_VERSION, SCHEMA_VERSION, context.model_dump_json()),
+            )
+        if connection is None:
+            with self.database.connect() as db:
+                insert(db)
+        else:
+            insert(connection)
+        return request_id
+
     def get_request(self, request_id: str) -> dict | None:
         """Return the saved result without contacting the provider.
 
@@ -269,7 +300,8 @@ class GradingJobs:
             db.execute("BEGIN IMMEDIATE")
             job = db.execute(
                 """SELECT * FROM grading_requests WHERE state='queued' AND error IS NULL
-                   AND (? IS NULL OR id=?) ORDER BY rowid LIMIT 1""", (request_id, request_id)
+                   AND (kind IN ('connection_test','practice') OR id=?)
+                   AND (? IS NULL OR id=?) ORDER BY rowid LIMIT 1""", (request_id, request_id, request_id)
             ).fetchone()
             if job:
                 db.execute("UPDATE grading_requests SET state='preparing' WHERE id=?", (job["id"],))
