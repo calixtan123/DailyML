@@ -12,6 +12,7 @@ from .config import Settings
 from .database import Database
 from .grading import PROMPT_VERSION, SCHEMA_VERSION, GradingContext, calculate_grade
 from .provider import MESSAGES, DispatchCancelled, Provider, ProviderFailure
+from .scheduling import record_initial_assessment
 
 logger = logging.getLogger(__name__)
 DAY_SECONDS = 24 * 60 * 60
@@ -358,6 +359,9 @@ class GradingJobs:
                          result.response_id if result else None, json.dumps(result.usage) if result else None,
                          self.clock(), latency_ms, claimed_id),
                     )
+                    if changed.rowcount == 1 and state == "assessed" and row["kind"] == "practice":
+                        timezone, _ = self.settings.effective_timezone(self.database.read_preferences(db))
+                        record_initial_assessment(db, claimed_id, timezone, self.settings.review_intervals)
                     if changed.rowcount == 1 and confirmed_unsent:
                         if automatic_retry:
                             db.execute("DELETE FROM model_rate_limit_retries WHERE request_id=?", (claimed_id,))

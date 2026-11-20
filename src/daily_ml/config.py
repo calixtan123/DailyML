@@ -6,6 +6,7 @@ import os
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -13,6 +14,7 @@ from .database import Database, Preferences
 
 EDITABLE = {"timezone", "model_id"}
 TEXT_KEYS = {"data_dir", "timezone", "model_id"}
+MAX_REVIEW_INTERVAL_DAYS = (date.max - date.min).days
 
 
 class ConfigError(ValueError):
@@ -34,6 +36,25 @@ class Settings:
     preferences: Preferences
     sources: dict[str, str]
     default_timezone: str
+
+    def effective_timezone(self, preferences: Preferences) -> tuple[str, str]:
+        """Resolve the learning timezone using current editable preferences.
+
+        Parameters
+        ----------
+        preferences : Preferences
+            Snapshot from the caller's read or write transaction.
+
+        Returns
+        -------
+        tuple of str
+            Effective timezone and its configuration source.
+        """
+        source = self.sources["timezone"]
+        if source in ("installation", "environment"):
+            return self.timezone, source
+        timezone = preferences.values.get("timezone")
+        return (str(timezone), "preferences") if timezone else (self.default_timezone, "default")
 
 
 @dataclass(frozen=True)
@@ -116,10 +137,21 @@ def _validate(values: dict[str, object], allowed: set[str]) -> None:
         if (
             not isinstance(intervals, list)
             or len(intervals) != 5
-            or any(type(value) is not int or value <= 0 for value in intervals)
+            or any(type(value) is not int or not 0 < value <= MAX_REVIEW_INTERVAL_DAYS for value in intervals)
             or sorted(set(intervals)) != intervals
         ):
             raise _error("review_intervals")
+
+
+def bundled_defaults() -> dict[str, object]:
+    """Read the defaults shipped with the installed Python package.
+
+    Returns
+    -------
+    dict
+        Default settings before installation and preference overrides.
+    """
+    return _read_toml(Path(__file__).with_name("defaults.toml"))
 
 
 def resolve_installation(
@@ -145,7 +177,7 @@ def resolve_installation(
         If an installation or environment setting is invalid.
     """
     environ = os.environ if environ is None else environ
-    defaults = _read_toml(Path(__file__).with_name("defaults.toml"))
+    defaults = bundled_defaults()
     allowed = set(defaults) | EDITABLE
     configured_path = environ.get("DML_CONFIG")
     explicit_path = config_path is not None or configured_path is not None

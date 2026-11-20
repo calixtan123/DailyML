@@ -8,7 +8,7 @@ from dataclasses import asdict
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import BackgroundTasks, FastAPI, Query, Request
+from fastapi import BackgroundTasks, FastAPI, Path as PathParam, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -28,6 +28,7 @@ from .practice import (
     SubmissionConflict,
 )
 from .provider import Provider, ProviderFailure
+from .scheduling import ReviewState
 
 logger = logging.getLogger(__name__)
 MUTATIONS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -75,6 +76,13 @@ class PracticeChoice(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     section_id: str | None = Field(default=None, pattern=ID_PATTERN, max_length=64)
     question_id: str | None = Field(default=None, pattern=ID_PATTERN, max_length=64)
+
+
+class ReviewSoonerAction(BaseModel):
+    """Validate one learner request to move a concept review earlier."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    idempotency_key: str = Field(min_length=1, max_length=128)
 
 
 class DraftEdit(BaseModel):
@@ -162,7 +170,7 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
     bank = validate_bank()
     database = Database(settings.data_dir)
     import_bank(database, bank)
-    practice = Practice(database, answer_limit=settings.answer_limit)
+    practice = Practice(database, answer_limit=settings.answer_limit, review_intervals=settings.review_intervals)
     host = f"127.0.0.1:{port}"
     origin = f"http://{host}"
     cookie_name = f"daily_ml_session_{port}"
@@ -380,15 +388,8 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
 
     def settings_payload(preferences: Preferences) -> dict[str, str | int]:
         """Show the effective timezone, version and override visible to the user."""
-        source = settings.sources["timezone"]
-        if source in ("installation", "environment"):
-            return {"timezone": settings.timezone, "version": preferences.version, "source": source}
-        timezone = preferences.values.get("timezone")
-        return {
-            "timezone": timezone or settings.default_timezone,
-            "version": preferences.version,
-            "source": "preferences" if timezone else "default",
-        }
+        timezone, source = settings.effective_timezone(preferences)
+        return {"timezone": timezone, "version": preferences.version, "source": source}
 
     def practice_timezone() -> str:
         """Read the same effective timezone displayed in Settings."""
@@ -456,6 +457,13 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
     def open_today() -> PracticeToday:
         """Prepare and return the current date's saved local practice session."""
         return practice.today(practice_timezone())
+
+    @app.post("/api/practice/reviews/{concept_id}/sooner")
+    def review_sooner(
+        action: ReviewSoonerAction, concept_id: str = PathParam(pattern=ID_PATTERN, max_length=64),
+    ) -> ReviewState:
+        """Save tomorrow or the existing earlier concept review date."""
+        return practice.review_sooner(concept_id, action.idempotency_key, practice_timezone())
 
     @app.post("/api/practice/items")
     def add_practice(choice: PracticeChoice) -> PracticeAddition:

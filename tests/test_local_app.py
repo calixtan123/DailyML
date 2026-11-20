@@ -243,8 +243,9 @@ def test_question_browser_routes_only_expose_public_fields(client):
     assert response.headers["cache-control"] == "no-store"
     assert {row["id"] for row in response.json()} == {"forest-mechanics", "tree-diversity"}
     for row in response.json():
-        assert set(row) == {"id", "version", "title", "prompt", "objective", "difficulty"}
+        assert set(row) == {"id", "version", "title", "prompt", "objective", "difficulty", "concept_id"}
         assert row["prompt"] and row["objective"] and row["difficulty"] == "introductory"
+        assert row["concept_id"]
     assert client.get("/api/questions", params={"section_id": "missing"}).status_code == 404
     assert client.get("/api/questions").status_code == 422
     assert client.get("/api/questions", params={"section_id": "https://invalid.test"}).status_code == 422

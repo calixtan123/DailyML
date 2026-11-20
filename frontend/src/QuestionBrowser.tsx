@@ -9,6 +9,7 @@ type Question = {
   prompt: string
   objective: string
   difficulty: 'introductory' | 'intermediate' | 'advanced'
+  concept_id: string
 }
 
 type LoadState<T> =
@@ -65,9 +66,14 @@ const difficultyLabels: Record<Question['difficulty'], string> = {
 }
 
 type PracticeChoice = { section_id: string; question_id?: string }
-type PracticeActions = { onPractice?: (choice: PracticeChoice) => void; practiceDisabled?: boolean }
+export type ReviewDates = { today: string; byConcept: Record<string, { due_date: string | null }> }
+type PracticeActions = {
+  onPractice?: (choice: PracticeChoice) => void
+  practiceDisabled?: boolean
+  reviewDates?: ReviewDates
+}
 
-function SectionQuestions({ section, request, onPractice, practiceDisabled }: {
+function SectionQuestions({ section, request, onPractice, practiceDisabled, reviewDates }: {
   section: Section
   request: LocalRequest
 } & PracticeActions) {
@@ -82,6 +88,7 @@ function SectionQuestions({ section, request, onPractice, practiceDisabled }: {
   if (!current) {
     return <p className="panel browser-state" role="status">This section has no available questions. Choose another section.</p>
   }
+  const dueDate = reviewDates?.byConcept[current.concept_id]?.due_date
 
   return (
     <div className="browser-grid">
@@ -100,6 +107,9 @@ function SectionQuestions({ section, request, onPractice, practiceDisabled }: {
         <div className="browser-objective">
           <h3>Learning objective</h3>
           <p>{current.objective}</p>
+          {reviewDates && dueDate && (
+            <p>{dueDate <= reviewDates.today ? 'Review due' : 'Next review'} <time dateTime={dueDate}>{dueDate}</time></p>
+          )}
           {onPractice && (
             <button type="button" disabled={practiceDisabled}
               onClick={() => onPractice({ section_id: section.id, question_id: current.id })}>
@@ -112,7 +122,7 @@ function SectionQuestions({ section, request, onPractice, practiceDisabled }: {
   )
 }
 
-export function QuestionBrowser({ request, onPractice, practiceDisabled }: {
+export function QuestionBrowser({ request, onPractice, practiceDisabled, reviewDates }: {
   request: LocalRequest
 } & PracticeActions) {
   const { result, retry } = useBankResource<Section[]>(request, '/api/sections')
@@ -140,7 +150,7 @@ export function QuestionBrowser({ request, onPractice, practiceDisabled }: {
         )}
       </div>
       <SectionQuestions key={current.id} section={current} request={request}
-        onPractice={onPractice} practiceDisabled={practiceDisabled} />
+        onPractice={onPractice} practiceDisabled={practiceDisabled} reviewDates={reviewDates} />
     </div>
   )
 }

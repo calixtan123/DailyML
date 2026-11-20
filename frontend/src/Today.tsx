@@ -1,15 +1,17 @@
 import { Plus } from 'lucide-react'
-import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
+import { type RefObject, useCallback, useEffect, useEffectEvent, useRef, useState } from 'react'
 import { LocalApiError, type LocalRequest } from './api'
 import { type Draft, type LeaveEditor, savedAlternative, useUnsavedDraftWarning } from './drafts'
 import { PracticeCalendar } from './PracticeCalendar'
 import { PracticeFeedback, type GradingStatus, type SavedSubmission } from './PracticeFeedback'
-import { QuestionBrowser } from './QuestionBrowser'
+import { QuestionBrowser, type ReviewDates } from './QuestionBrowser'
 
 type PracticeItem = {
   id: string
   local_date: string
   question: {
+    id: string
+    concept_id: string
     title: string
     prompt: string
     objective: string
@@ -22,6 +24,8 @@ type PracticeItem = {
   grading_status: GradingStatus | null
 }
 type Selection = { item: PracticeItem; kind: 'review' | 'variety' | 'extra' | 'focused' }
+type Review = { stage: number; due_date: string | null; awaiting_assessment: boolean }
+type DueReview = { question_id: string; section_id: string; title: string }
 type Session = {
   local_date: string
   timezone: string
@@ -34,6 +38,8 @@ type Session = {
   submitted: PracticeItem[]
   completion_counts: Record<string, number>
   first_use_date: string
+  reviews: Record<string, Review>
+  due_reviews: DueReview[]
 }
 type Addition = { today: Session; item_id: string | null; message: string | null }
 type Choice = { section_id?: string; question_id?: string }
@@ -47,7 +53,9 @@ export type LeaveToday = LeaveEditor
 
 const DATE_CHECK_MS = 60_000
 
-function jsonOptions(method: 'POST' | 'PUT', body: Draft | Choice | (Draft & { idempotency_key: string })): RequestInit {
+function jsonOptions(
+  method: 'POST' | 'PUT', body: Draft | Choice | { idempotency_key: string },
+): RequestInit {
   return { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
 }
 
@@ -120,13 +128,16 @@ export function Today({ request, active, leaveToday }: {
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
   const [actionError, setActionError] = useState('')
+  const [reviewError, setReviewError] = useState('')
   const [copyStatus, setCopyStatus] = useState('')
   const [browsing, setBrowsing] = useState(false)
   const [initialSubmission, setInitialSubmission] = useState<SavedSubmission>()
   const feedbackLeave = useRef<LeaveEditor | null>(null)
   const lastStatus = useRef<{ itemId: string; status: GradingStatus }>(undefined)
+  const reviewActionKeys = useRef(new Map<string, string>())
   const operation = useRef(false)
   const operationVersion = useRef(0)
+  const refreshAfterOperation = useRef(false)
   const heading = useRef<HTMLHeadingElement>(null)
   const focusQuestion = useRef(false)
   const answer = useRef<HTMLTextAreaElement>(null)
@@ -135,23 +146,41 @@ export function Today({ request, active, leaveToday }: {
   const characterCount = Array.from(editor?.text ?? '').length
   const overLimit = session !== undefined && characterCount > session.answer_limit
 
+  const requestTodayRefresh = useCallback(() => {
+    if (operation.current) {
+      refreshAfterOperation.current = true
+      return
+    }
+    setLoadAttempt(previous => previous + 1)
+  }, [])
+
   const observeGradingStatus = useCallback((itemId: string, status: GradingStatus) => {
     if (lastStatus.current?.itemId !== itemId || lastStatus.current?.status !== status) {
       lastStatus.current = { itemId, status }
+      if (status === 'assessed') requestTodayRefresh()
     }
     setSession(current => current && updateGradingStatus(current, itemId, status))
     setEditor(current => current && current.item.id === itemId && current.item.grading_status !== status
       ? { ...current, item: { ...current.item, grading_status: status } } : current)
-  }, [])
+  }, [requestTodayRefresh])
+
+  const needsTodayRefresh = useEffectEvent(() => {
+    if (!session || currentLocalDate(session.effective_timezone) !== session.local_date) return true
+    const submitted = [...session.selections.map(({ item }) => item), ...session.submitted]
+    return submitted.some(({ grading_status }) => grading_status === 'queued' || grading_status === 'in_flight')
+  })
 
   useEffect(() => {
     if (!active) return
     const controller = new AbortController()
-    let lastSession: Session | undefined
     let loading = false
 
     async function refresh() {
-      if (loading || operation.current) return
+      if (operation.current) {
+        refreshAfterOperation.current = true
+        return
+      }
+      if (loading) return
       loading = true
       const version = operationVersion.current
       const priorStatus = lastStatus.current
@@ -162,7 +191,6 @@ export function Today({ request, active, leaveToday }: {
         if (observed && observed !== priorStatus) {
           today = updateGradingStatus(today, observed.itemId, observed.status)
         }
-        lastSession = today
         setSession(today)
         setLoadError(false)
         const first = today.selections[0]?.item ?? today.unfinished[0] ?? today.submitted[0]
@@ -173,25 +201,26 @@ export function Today({ request, active, leaveToday }: {
           return item ? { item, text: item.draft.text } : previous
         })
       } catch {
-        if (!controller.signal.aborted) setLoadError(true)
+        if (!controller.signal.aborted && version === operationVersion.current) setLoadError(true)
       } finally {
         loading = false
+        if (!controller.signal.aborted && version !== operationVersion.current) requestTodayRefresh()
       }
     }
 
-    function checkDate() {
-      if (!lastSession || currentLocalDate(lastSession.effective_timezone) !== lastSession.local_date) void refresh()
+    function checkToday() {
+      if (needsTodayRefresh()) void refresh()
     }
 
     void refresh()
-    const timer = window.setInterval(checkDate, DATE_CHECK_MS)
-    window.addEventListener('focus', checkDate)
+    const timer = window.setInterval(checkToday, DATE_CHECK_MS)
+    window.addEventListener('focus', checkToday)
     return () => {
       controller.abort()
       window.clearInterval(timer)
-      window.removeEventListener('focus', checkDate)
+      window.removeEventListener('focus', checkToday)
     }
-  }, [request, active, loadAttempt])
+  }, [request, active, loadAttempt, requestTodayRefresh])
 
   useUnsavedDraftWarning(dirty)
 
@@ -212,6 +241,7 @@ export function Today({ request, active, leaveToday }: {
     setEditor({ item, text: item.draft.text })
     setSaveState({ kind: 'idle' })
     setCopyStatus('')
+    setReviewError('')
     setInitialSubmission(undefined)
   }
 
@@ -283,6 +313,10 @@ export function Today({ request, active, leaveToday }: {
     } finally {
       operation.current = false
       setBusy(false)
+      if (refreshAfterOperation.current) {
+        refreshAfterOperation.current = false
+        requestTodayRefresh()
+      }
     }
   }
 
@@ -321,6 +355,34 @@ export function Today({ request, active, leaveToday }: {
     })
   }
 
+  async function reviewSooner(conceptId: string) {
+    await run(async () => {
+      setReviewError('')
+      const key = reviewActionKeys.current.get(conceptId) ?? crypto.randomUUID()
+      reviewActionKeys.current.set(conceptId, key)
+      try {
+        const review = await request<Review>(
+          `/api/practice/reviews/${encodeURIComponent(conceptId)}/sooner`,
+          jsonOptions('POST', { idempotency_key: key }),
+        )
+        reviewActionKeys.current.delete(conceptId)
+        setSession(current => current && { ...current, reviews: { ...current.reviews, [conceptId]: review } })
+      } catch {
+        setReviewError('Could not confirm the earlier review date. Try again.')
+      } finally {
+        requestTodayRefresh()
+      }
+    })
+  }
+
+  function openDueReview(review: DueReview) {
+    const existing = [...selections.map(({ item }) => item), ...unfinished].find(
+      item => !item.submitted && item.question.id === review.question_id,
+    )
+    if (existing) selectItem(existing)
+    else void addQuestion({ section_id: review.section_id, question_id: review.question_id })
+  }
+
   async function copyAnswer() {
     if (!editor) return
     try {
@@ -344,7 +406,7 @@ export function Today({ request, active, leaveToday }: {
 
   function retryToday() {
     setLoadError(false)
-    setLoadAttempt(previous => previous + 1)
+    requestTodayRefresh()
   }
 
   const selections = session?.selections ?? []
@@ -356,6 +418,10 @@ export function Today({ request, active, leaveToday }: {
   const submittedItems = previousItem?.submitted ? [previousItem, ...submitted] : submitted
   const controlsDisabled = !session || busy || saveState.kind === 'conflict' || saveState.kind === 'submitted_elsewhere'
   const question = editor?.item.question
+  const review = question ? session?.reviews?.[question.concept_id] : undefined
+  const reviewDates: ReviewDates | undefined = session && {
+    today: session.local_date, byConcept: session.reviews ?? {},
+  }
 
   return (
     <>
@@ -450,6 +516,21 @@ export function Today({ request, active, leaveToday }: {
               </div>
             </>
           )}
+          {!!session?.due_reviews?.length && (
+            <div className="today-due-reviews">
+              <h3>Due reviews</h3>
+              <ul>
+                {session.due_reviews.map(review => (
+                  <li key={review.question_id}>
+                    <button type="button" disabled={controlsDisabled}
+                      aria-label={`Review ${review.title}`} onClick={() => openDueReview(review)}>
+                      {review.title}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <button className="today-more" type="button" disabled={controlsDisabled} onClick={() => void addQuestion({})}>
             <Plus size={17} aria-hidden="true" /> More questions
           </button>
@@ -463,6 +544,21 @@ export function Today({ request, active, leaveToday }: {
               <h2 tabIndex={-1} ref={heading} id="practice-question-title">{question.title}</h2>
               <p>{question.prompt}</p>
               <p className="today-objective">{question.objective}</p>
+              {(review?.due_date || review?.awaiting_assessment || editor.item.submitted) && (
+                <div className="actions today-review">
+                  {review?.awaiting_assessment && <p role="status">Awaiting accepted assessment</p>}
+                  {review?.due_date && (
+                    <p role="status">
+                      {review.due_date <= session.local_date ? 'Review due' : 'Next review'}{' '}
+                      <time dateTime={review.due_date}>{review.due_date}</time>
+                    </p>
+                  )}
+                  <button type="button"
+                    disabled={controlsDisabled || (!!review?.due_date && review.due_date <= session.local_date)}
+                    onClick={() => void reviewSooner(question.concept_id)}>Review sooner</button>
+                </div>
+              )}
+              {reviewError && <p className="error" role="alert">{reviewError}</p>}
             </header>
             {editor.item.submitted ? (
               <PracticeFeedback key={editor.item.id} itemId={editor.item.id} request={request} active={active}
@@ -547,7 +643,7 @@ export function Today({ request, active, leaveToday }: {
       <details className="today-bank" open={browsing} onToggle={event => setBrowsing(event.currentTarget.open)}>
         <summary>Browse questions</summary>
         {browsing && <QuestionBrowser request={request} onPractice={choice => void addQuestion(choice)}
-          practiceDisabled={controlsDisabled} />}
+          practiceDisabled={controlsDisabled} reviewDates={reviewDates} />}
       </details>
     </>
   )

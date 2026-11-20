@@ -55,6 +55,7 @@ def test_preferences_load_from_resolved_data_directory(tmp_path, monkeypatch):
         ("DML_GRADE_THRESHOLDS", "[0.6, 0.25, 0.85]"),
         ("DML_GRADE_THRESHOLDS", "[0.25, 0.60, 1.0]"),
         ("DML_REVIEW_INTERVALS", "[1, 3, 3, 14, 30]"),
+        ("DML_REVIEW_INTERVALS", "[1, 3, 7, 14, 3652059]"),
         ("DML_ANSWER_LIMIT", "0"),
         ("DML_REQUEST_TIMEOUT", "inf"),
         ("DML_PORT", "65536"),
