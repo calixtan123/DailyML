@@ -187,3 +187,88 @@ test('Two tabs share an original, reopen an offline revision and resolve an asse
     }
   },
 )
+
+test('A revealed offline gap is acknowledged after midnight, credited, scheduled, and restored after reload',
+  async ({ page, context }) => {
+    const beforeMidnight = '2026-03-29T22:58:00+00:00'
+    const afterMidnight = '2026-03-29T23:01:00+00:00'
+    const root = await mkdtemp(join(tmpdir(), 'daily-ml gap '))
+    const clockFile = join(root, 'clock')
+    const gate = join(root, 'release-offline-grading')
+    await writeFile(clockFile, beforeMidnight)
+    const executable = process.env.DML_E2E_EXECUTABLE ?? resolve('../.venv/bin/daily-ml')
+    const child = spawn(join(dirname(executable), 'python'), [resolve('e2e/practice_server.py')], {
+      cwd: root,
+      env: {
+        ...process.env, DML_DATA_DIR: join(root, 'App data'), DML_PORT: '0', DML_TIMEZONE: 'Europe/London',
+        DML_E2E_CLOCK: clockFile, DML_E2E_GRADING_GATE: gate,
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+
+    try {
+      const origin = await new Promise<string>((ready, reject) => {
+        let output = ''
+        const deadline = setTimeout(() => reject(new Error(`Test launcher did not start. ${output}`)), 8_000)
+        child.once('error', (error) => { clearTimeout(deadline); reject(error) })
+        child.once('exit', () => { clearTimeout(deadline); reject(new Error(output)) })
+        child.stderr?.on('data', (chunk: Buffer) => {
+          output += chunk.toString()
+          const address = output.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0]
+          if (address) { clearTimeout(deadline); ready(address) }
+        })
+      })
+      let submitRequests = 0
+      await context.route(/.*/, async route => {
+        const request = route.request()
+        const url = new URL(request.url())
+        if (url.origin !== origin) {
+          await route.abort()
+          return
+        }
+        if (url.pathname.endsWith('/submit')) submitRequests += 1
+        await route.continue()
+      })
+
+      await page.clock.install({ time: new Date(beforeMidnight) })
+      await page.goto(origin)
+      const title = (await page.locator('#practice-question-title').textContent())!
+      await expect(page.getByText('No practice yet today')).toBeVisible()
+      await page.getByRole('button', { name: "I don't know" }).click()
+      await expect(page.getByRole('heading', { name: 'Reference explanation' })).toBeVisible()
+      await expect(page.getByRole('region', { name: 'Learning support' }).locator('.practice-support-content p').first())
+        .toHaveText(/\S+/)
+      await expect(page.getByRole('button', { name: 'Mark as completed' })).toBeVisible()
+      expect(submitRequests).toBe(0)
+
+      await writeFile(clockFile, afterMidnight)
+      await page.clock.setSystemTime(new Date(afterMidnight))
+      await page.getByRole('button', { name: 'Mark as completed' }).click()
+      const practice = page.getByRole('article')
+      await expect(practice.getByText('Self-reported gap')).toBeVisible()
+      await expect(page.getByText('1 of 2 completed today')).toBeVisible()
+      await expect(practice.getByText('Next review')).toBeVisible()
+      await expect(practice.getByText('2026-03-31', { exact: true })).toBeVisible()
+      expect(submitRequests).toBe(0)
+
+      await page.reload()
+      const session = page.getByRole('complementary', { name: 'Today’s session' })
+      await session.getByRole('button', { name: new RegExp(`${title}.*Self-reported gap`) }).click()
+      await expect(practice.getByText('Self-reported gap')).toBeVisible()
+      await expect(practice.getByText("I don't know", { exact: true })).toBeVisible()
+      await expect(practice.getByText('Next review')).toBeVisible()
+      await expect(practice.getByText('2026-03-31', { exact: true })).toBeVisible()
+      expect(submitRequests).toBe(0)
+    } finally {
+      await writeFile(gate, 'cleanup')
+      if (child.pid && child.exitCode === null && child.signalCode === null) {
+        await new Promise<void>(done => {
+          const kill = setTimeout(() => child.kill('SIGKILL'), 5_000)
+          child.once('exit', () => { clearTimeout(kill); done() })
+          child.kill('SIGINT')
+        })
+      }
+      await rm(root, { recursive: true, force: true })
+    }
+  },
+)

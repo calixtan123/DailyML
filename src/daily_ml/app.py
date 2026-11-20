@@ -6,6 +6,7 @@ import sqlite3
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 from fastapi import BackgroundTasks, FastAPI, Path as PathParam, Query, Request
@@ -25,7 +26,7 @@ from .grading import GradingContext
 from .grading_jobs import GradingJobs, RetryConflict
 from .practice import (
     Draft, DraftConflict, DraftInvalid, Practice, PracticeAddition, PracticeItemNotFound, PracticeToday,
-    SubmissionConflict,
+    SubmissionConflict, SupportUnavailable,
 )
 from .provider import Provider, ProviderFailure
 from .scheduling import ReviewState
@@ -78,8 +79,8 @@ class PracticeChoice(BaseModel):
     question_id: str | None = Field(default=None, pattern=ID_PATTERN, max_length=64)
 
 
-class ReviewSoonerAction(BaseModel):
-    """Validate one learner request to move a concept review earlier."""
+class PracticeAction(BaseModel):
+    """Validate the stable action key for a retryable practice mutation."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
     idempotency_key: str = Field(min_length=1, max_length=128)
@@ -437,6 +438,11 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         """Show a conflict without echoing the competing text."""
         return _error(409, str(error))
 
+    @app.exception_handler(SupportUnavailable)
+    async def support_unavailable(_request: Request, error: SupportUnavailable):
+        """Explain when the saved question version lacks teaching content."""
+        return _error(404, str(error))
+
     def submission_settings(connection: sqlite3.Connection) -> tuple[str, str | None]:
         """Use the timezone and model preferences in the locked submission snapshot."""
         preferences = database.read_preferences(connection)
@@ -446,6 +452,25 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
     def read_submission(item_id: UUID) -> dict | None:
         """Return a practice answer or assessment without starting grading."""
         return practice.submission(str(item_id))
+
+    @app.post("/api/practice/items/{item_id}/help/{kind}")
+    def reveal_practice_help(item_id: UUID, kind: Literal["hint", "explanation"]) -> dict[str, str]:
+        """Return stored teaching content after its use has been saved."""
+        return {"content": practice.view_help(str(item_id), kind)}
+
+    @app.post("/api/practice/items/{item_id}/gap/reveal")
+    def reveal_practice_gap(item_id: UUID) -> dict[str, object]:
+        """Reveal the gap explanation while keeping the item incomplete."""
+        return practice.begin_gap(str(item_id))
+
+    @app.post("/api/practice/items/{item_id}/gap/acknowledge")
+    def acknowledge_practice_gap(item_id: UUID, action: PracticeAction) -> dict:
+        """Award local completion and update the review date after acknowledgement."""
+        result = practice.acknowledge_gap(
+            str(item_id), action.idempotency_key,
+            resolve_timezone=lambda connection: settings.effective_timezone(database.read_preferences(connection))[0],
+        )
+        return {"submission": result.submission, "today": result.today}
 
     @app.post("/api/practice/items/{item_id}/submit", status_code=202)
     def submit_practice(item_id: UUID, action: SubmitAction, request: Request, background: BackgroundTasks) -> dict:
@@ -524,7 +549,7 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
 
     @app.post("/api/practice/reviews/{concept_id}/sooner")
     def review_sooner(
-        action: ReviewSoonerAction, concept_id: str = PathParam(pattern=ID_PATTERN, max_length=64),
+        action: PracticeAction, concept_id: str = PathParam(pattern=ID_PATTERN, max_length=64),
     ) -> ReviewState:
         """Save tomorrow or the existing earlier concept review date."""
         return practice.review_sooner(concept_id, action.idempotency_key, practice_timezone())

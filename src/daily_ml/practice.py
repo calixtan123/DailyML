@@ -1,11 +1,15 @@
 """Select, snapshot and save local practice independently of model access."""
 
 import json
+import os
 import sqlite3
 from collections.abc import Callable, Collection, Sequence
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone as utc
+from pathlib import Path
 from random import choice
+from tempfile import mkstemp
 from typing import Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -17,10 +21,35 @@ from .grading import GradingContext
 from .grading_jobs import enqueue_practice_request, practice_grading_status, public_request
 from .practice_versions import bind_grading_version, initialize_versions, save_answer_version
 from .disputes import disputes_projection, initialize_disputes, register_reassessment, resolve_dispute
-from .scheduling import NEXT_DAY, ReviewState, due_concepts as scheduled_due_concepts, initialize_reviews, read_reviews
+from .scheduling import (
+    NEXT_DAY,
+    ReviewState,
+    due_concepts as scheduled_due_concepts,
+    initialize_reviews,
+    read_reviews,
+    record_gap,
+)
 
 DAILY_GOAL = 2
 SelectionKind = Literal["review", "variety", "extra", "focused"]
+
+_CREDITS_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS practice_credits (
+        question_id TEXT NOT NULL,
+        local_date TEXT NOT NULL REFERENCES practice_days(local_date),
+        item_id TEXT NOT NULL UNIQUE REFERENCES practice_items(id),
+        FOREIGN KEY (item_id, question_id) REFERENCES practice_items(id, question_id),
+        PRIMARY KEY (question_id, local_date)
+    )
+    """
+_HELP_EVENTS_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS practice_help_events (
+        item_id TEXT NOT NULL REFERENCES practice_items(id),
+        kind TEXT NOT NULL CHECK (kind IN ('hint', 'explanation', 'gap_explanation')),
+        viewed_at REAL NOT NULL,
+        PRIMARY KEY (item_id, kind)
+    )
+    """
 
 _SCHEMA = (
     """
@@ -89,21 +118,28 @@ _SCHEMA = (
         SELECT RAISE(ABORT, 'The original submission is immutable');
     END
     """,
+    _CREDITS_SCHEMA,
+    "CREATE INDEX IF NOT EXISTS practice_credits_by_date ON practice_credits(local_date)",
     """
-    CREATE TABLE IF NOT EXISTS practice_credits (
-        question_id TEXT NOT NULL,
-        local_date TEXT NOT NULL REFERENCES practice_days(local_date),
-        item_id TEXT NOT NULL UNIQUE REFERENCES practice_submissions(item_id),
-        FOREIGN KEY (item_id, question_id) REFERENCES practice_items(id, question_id),
-        PRIMARY KEY (question_id, local_date)
+    CREATE TABLE IF NOT EXISTS practice_gap_completions (
+        item_id TEXT PRIMARY KEY REFERENCES practice_items(id),
+        completed_at REAL NOT NULL,
+        completed_date TEXT NOT NULL REFERENCES practice_days(local_date),
+        completed_timezone TEXT NOT NULL
     )
     """,
-    "CREATE INDEX IF NOT EXISTS practice_credits_by_date ON practice_credits(local_date)",
     """
     CREATE TABLE IF NOT EXISTS practice_clarification_drafts (
         request_id TEXT PRIMARY KEY REFERENCES grading_requests(id),
         text TEXT NOT NULL,
         version INTEGER NOT NULL CHECK (version > 0)
+    )
+    """,
+    _HELP_EVENTS_SCHEMA,
+    """
+    CREATE TABLE IF NOT EXISTS practice_gap_actions (
+        action_key TEXT PRIMARY KEY,
+        item_id TEXT NOT NULL REFERENCES practice_items(id)
     )
     """,
 )
@@ -135,6 +171,10 @@ class SubmissionConflict(RuntimeError):
 
 class PracticeItemNotFound(LookupError):
     """The requested practice item or available question could not be found."""
+
+
+class SupportUnavailable(LookupError):
+    """The saved question version lacks the requested support."""
 
 
 @dataclass(frozen=True)
@@ -283,11 +323,51 @@ class Practice:
         self.review_intervals = review_intervals if review_intervals is not None else tuple(bundled_defaults()["review_intervals"])
         database.initialize_grading()
         with self.database.connect(immediate=True) as connection:
+            self._migrate_practice_credits(connection)
             for statement in _SCHEMA:
                 connection.execute(statement)
             initialize_reviews(connection, self.review_intervals)
             initialize_versions(connection)
             initialize_disputes(connection)
+
+    def _migrate_practice_credits(self, connection: sqlite3.Connection) -> None:
+        """Move legacy credit rows to the item-level foreign key schema.
+
+        Older installations tied a credit's item to ``practice_submissions``.
+        Gap completions intentionally have no submission or grading request,
+        so the credit must reference the immutable practice item instead.
+        """
+        foreign_keys = connection.execute("PRAGMA foreign_key_list(practice_credits)").fetchall()
+        if not any(row[2] == "practice_submissions" for row in foreign_keys):
+            return
+        self._backup_before_credit_upgrade()
+        connection.execute("DROP INDEX IF EXISTS practice_credits_by_date")
+        connection.execute("ALTER TABLE practice_credits RENAME TO practice_credits_legacy")
+        connection.execute(_CREDITS_SCHEMA)
+        connection.execute(
+            """INSERT INTO practice_credits (question_id, local_date, item_id)
+               SELECT question_id, local_date, item_id FROM practice_credits_legacy"""
+        )
+        connection.execute("DROP TABLE practice_credits_legacy")
+
+    def _backup_before_credit_upgrade(self) -> None:
+        """Save and verify a private backup while the migration holds the write lock."""
+        fd, filename = mkstemp(
+            prefix="daily-ml-before-gap-upgrade-", suffix=".sqlite3", dir=self.database.path.parent,
+        )
+        os.close(fd)
+        backup = Path(filename)
+        try:
+            # Back up from a separate reader of the committed, pre-upgrade database.
+            with self.database.connect() as source, closing(sqlite3.connect(backup)) as target:
+                source.backup(target)
+                if target.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
+                    raise sqlite3.DatabaseError("Pre-upgrade backup failed its integrity check.")
+                if target.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise sqlite3.DatabaseError("Pre-upgrade backup failed its foreign-key check.")
+        except (OSError, sqlite3.Error):
+            backup.unlink(missing_ok=True)
+            raise
 
     def today(self, timezone: str) -> PracticeToday:
         """Get today's session, saving the recommendation pair if needed.
@@ -460,7 +540,9 @@ class Practice:
                 raise PracticeItemNotFound(item_id)
             saved = Draft(*row)
             if connection.execute(
-                "SELECT 1 FROM practice_submissions WHERE item_id = ?", (item_id,)
+                """SELECT 1 FROM practice_submissions WHERE item_id = ?
+                   UNION ALL SELECT 1 FROM practice_gap_completions WHERE item_id = ?""",
+                (item_id, item_id),
             ).fetchone():
                 raise SubmissionConflict("This answer was already submitted. Its original cannot be edited.")
             if saved.version != expected_version:
@@ -528,9 +610,14 @@ class Practice:
             original = connection.execute(
                 "SELECT original_text FROM practice_submissions WHERE item_id = ?", (item_id,)
             ).fetchone()
+            gap = connection.execute(
+                "SELECT 1 FROM practice_gap_completions WHERE item_id = ?", (item_id,)
+            ).fetchone()
             dispatch_id = None
             self._prepare_today(connection, day)
             if original is None:
+                if gap is not None:
+                    raise SubmissionConflict("A self-reported gap for this question was already recorded.")
                 if version != expected_version:
                     raise DraftConflict(Draft(draft_text, version))
                 request_id = enqueue_practice_request(
@@ -540,10 +627,13 @@ class Practice:
                     "INSERT INTO practice_submissions VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (item_id, text, day.timestamp, day.local_date, day.timezone, request_id, request_id),
                 )
-                support = connection.execute(
-                    "SELECT supported FROM practice_submission_support WHERE item_id = ?", (item_id,),
-                ).fetchone()
-                supported = support is not None and bool(support[0])
+                supported = connection.execute(
+                    "SELECT EXISTS (SELECT 1 FROM practice_help_events WHERE item_id = ?)", (item_id,)
+                ).fetchone()[0]
+                connection.execute(
+                    "INSERT INTO practice_submission_support VALUES (?, ?)",
+                    (item_id, supported),
+                )
                 save_answer_version(
                     connection, item_id, request_id, text, "original", "initial", supported, day.timestamp,
                 )
@@ -682,6 +772,185 @@ class Practice:
             except LookupError as error:
                 raise SubmissionConflict(str(error)) from None
             return self._read_submission(connection, item_id)
+    def view_help(self, item_id: str, kind: Literal["hint", "explanation"]) -> str:
+        """Record help use before returning the selected stored teaching text.
+
+        Parameters
+        ----------
+        item_id : str
+            Stable practice item identity.
+        kind : {"hint", "explanation"}
+            Stored support to reveal.
+
+        Returns
+        -------
+        str
+            The requested hint or reference explanation.
+
+        Raises
+        ------
+        PracticeItemNotFound
+            If the practice item does not exist.
+        ValueError
+            If ``kind`` is not a supported help type.
+        SupportUnavailable
+            If the saved question version has no matching teaching content.
+        """
+        if kind not in ("hint", "explanation"):
+            raise ValueError("Help must be a hint or explanation.")
+        with self.database.connect(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT snapshot_json FROM practice_items WHERE id = ?", (item_id,)
+            ).fetchone()
+            if row is None:
+                raise PracticeItemNotFound(item_id)
+            record = json.loads(row[0])
+            content_key = "hint" if kind == "hint" else "reference_explanation"
+            content = record.get(content_key)
+            if not content:
+                raise SupportUnavailable(f"This question has no {kind} available.")
+            connection.execute(
+                "INSERT OR IGNORE INTO practice_help_events VALUES (?, ?, ?)",
+                (item_id, kind, self._clock().timestamp()),
+            )
+        return content
+
+    def begin_gap(self, item_id: str) -> dict[str, object]:
+        """Reveal and persist the explanation required before a gap is recorded.
+
+        Parameters
+        ----------
+        item_id : str
+            Stable practice item identity.
+
+        Returns
+        -------
+        dict[str, object]
+            Explanation text and the acknowledgement requirement.
+
+        Raises
+        ------
+        PracticeItemNotFound
+            If the practice item does not exist.
+        SubmissionConflict
+            If the item already has a competing submitted answer.
+        SupportUnavailable
+            If the saved question version has no reference explanation.
+        """
+        with self.database.connect(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT snapshot_json FROM practice_items WHERE id = ?", (item_id,)
+            ).fetchone()
+            if row is None:
+                raise PracticeItemNotFound(item_id)
+            if connection.execute(
+                """SELECT 1 FROM practice_submissions WHERE item_id = ?
+                   UNION ALL SELECT 1 FROM practice_gap_completions WHERE item_id = ?""",
+                (item_id, item_id),
+            ).fetchone():
+                raise SubmissionConflict("This question was already submitted.")
+            explanation = json.loads(row[0]).get("reference_explanation")
+            if not explanation:
+                raise SupportUnavailable("This question has no explanation available.")
+            connection.execute(
+                "INSERT OR IGNORE INTO practice_help_events VALUES (?, 'gap_explanation', ?)",
+                (item_id, self._clock().timestamp()),
+            )
+        return {
+            "item_id": item_id,
+            "explanation": explanation,
+            "acknowledgement_required": True,
+        }
+
+    def acknowledge_gap(
+        self, item_id: str, idempotency_key: str, *,
+        resolve_timezone: Callable[[sqlite3.Connection], str],
+    ) -> SubmissionResult:
+        """Save a viewed self-reported gap and its local completion credit once.
+
+        Parameters
+        ----------
+        item_id : str
+            Stable practice item identity.
+        idempotency_key : str
+            Browser action identity used to make acknowledgement retries safe.
+        resolve_timezone : callable
+            Read the effective learning timezone from the completion transaction.
+
+        Returns
+        -------
+        SubmissionResult
+            The local self-reported-gap submission and updated Today session.
+
+        Raises
+        ------
+        PracticeItemNotFound
+            If the practice item does not exist.
+        SubmissionConflict
+            If the explanation was not viewed or another answer won the race.
+        """
+        with self.database.connect(immediate=True) as connection:
+            day = self._day(resolve_timezone(connection))
+            item = connection.execute(
+                "SELECT question_id FROM practice_items WHERE id = ?", (item_id,)
+            ).fetchone()
+            if item is None:
+                raise PracticeItemNotFound(item_id)
+
+            prior = connection.execute(
+                "SELECT item_id FROM practice_gap_actions WHERE action_key = ?", (idempotency_key,)
+            ).fetchone()
+            if prior is not None:
+                if prior[0] != item_id:
+                    raise SubmissionConflict("This gap acknowledgement already belongs to another question.")
+                self._prepare_today(connection, day)
+                submission = self._read_submission(connection, item_id)
+                if submission is None:
+                    raise SubmissionConflict("The saved gap acknowledgement is unavailable.")
+                return SubmissionResult(submission, self._today(connection, day), None)
+
+            if connection.execute(
+                "SELECT 1 FROM practice_gap_completions WHERE item_id = ?", (item_id,)
+            ).fetchone():
+                connection.execute(
+                    "INSERT INTO practice_gap_actions VALUES (?, ?)", (idempotency_key, item_id)
+                )
+                self._prepare_today(connection, day)
+                submission = self._read_submission(connection, item_id)
+                return SubmissionResult(submission, self._today(connection, day), None)
+
+            if connection.execute(
+                "SELECT 1 FROM practice_submissions WHERE item_id = ?", (item_id,)
+            ).fetchone():
+                raise SubmissionConflict("An answer for this question was already submitted.")
+
+            if not connection.execute(
+                "SELECT 1 FROM practice_help_events WHERE item_id = ? AND kind = 'gap_explanation'", (item_id,)
+            ).fetchone():
+                raise SubmissionConflict("View the explanation before recording a self-reported gap.")
+
+            self._prepare_today(connection, day)
+            question_id = item[0]
+            connection.execute(
+                "INSERT INTO practice_gap_completions VALUES (?, ?, ?, ?)",
+                (item_id, day.timestamp, day.local_date, day.timezone),
+            )
+            connection.execute(
+                """INSERT INTO practice_credits VALUES (?, ?, ?)
+                   ON CONFLICT(question_id, local_date) DO NOTHING""",
+                (question_id, day.local_date, item_id),
+            )
+            connection.execute(
+                "UPDATE practice_items SET last_practised_date = ? WHERE id = ?",
+                (day.local_date, item_id),
+            )
+            record_gap(connection, item_id, day.timestamp, day.local_date, self.review_intervals)
+            connection.execute(
+                "INSERT INTO practice_gap_actions VALUES (?, ?)", (idempotency_key, item_id)
+            )
+            submission = self._read_submission(connection, item_id)
+            today = self._today(connection, day)
+        return SubmissionResult(submission, today, None)
 
     def save_clarification_draft(
         self, item_id: str, request_id: str, text: str, *, expected_version: int,
@@ -1031,7 +1300,7 @@ class Practice:
                WHERE s.item_id = ?""", (item_id,),
         ).fetchone()
         if row is None:
-            return None
+            return cls._read_gap(connection, item_id)
         revision = None
         revision_draft = None
         if row["revision_request_id"] is not None:
@@ -1072,11 +1341,46 @@ class Practice:
             "completed_date": row["completed_date"],
             "completed_timezone": row["completed_timezone"],
             "credited": bool(row["credited"]),
+            "assisted": bool(row["supported"]),
             **cls._answer_view(connection, row),
             "versions": versions,
             "revision": revision,
             "revision_draft": revision_draft,
             "disputes": disputes_projection(connection, item_id),
+        }
+
+    @staticmethod
+    def _read_gap(connection: sqlite3.Connection, item_id: str) -> dict | None:
+        """Return the offline gap completion for an item, if present."""
+        gap = connection.execute(
+            """SELECT completed_at, completed_date, completed_timezone,
+                      EXISTS (SELECT 1 FROM practice_credits c WHERE c.item_id = g.item_id) AS credited
+               FROM practice_gap_completions AS g WHERE g.item_id = ?""",
+            (item_id,),
+        ).fetchone()
+        if gap is None:
+            return None
+        completed_at, completed_date, completed_timezone, credited = gap
+        return {
+            "text": "I don't know",
+            "completed_at": completed_at,
+            "completed_date": completed_date,
+            "completed_timezone": completed_timezone,
+            "credited": bool(credited),
+            "assisted": False,
+            "disputes": [],
+            "versions": [],
+            "revision": None,
+            "revision_draft": None,
+            "assessed_text": "I don't know",
+            "clarification_draft": None,
+            "request": {
+                "id": None, "state": "self_reported_gap", "model_id": None, "grade": None,
+                "error": None, "retry_of": None, "schema_mode": None, "prompt_version": None,
+                "schema_version": None, "created_at": completed_at, "finished_at": completed_at,
+                "latency_ms": None, "feedback": None, "reference": None, "usage": None,
+                "can_send": False, "message": None,
+            },
         }
 
     @staticmethod
@@ -1201,6 +1505,7 @@ class Practice:
             """SELECT id FROM practice_items
                WHERE question_id = ? AND trim(draft_text) <> ''
                  AND id NOT IN (SELECT item_id FROM practice_submissions)
+                 AND id NOT IN (SELECT item_id FROM practice_gap_completions)
                ORDER BY (id = ?) DESC, created_at DESC, id LIMIT 1""",
             (question_id, preferred_id),
         ).fetchone()
@@ -1242,7 +1547,8 @@ class Practice:
                 """SELECT selection.item_id
                    FROM practice_selections AS selection
                    LEFT JOIN practice_submissions AS submission ON submission.item_id = selection.item_id
-                   WHERE selection.local_date = ? AND submission.item_id IS NULL""",
+                   LEFT JOIN practice_gap_completions AS gap ON gap.item_id = selection.item_id
+                   WHERE selection.local_date = ? AND submission.item_id IS NULL AND gap.item_id IS NULL""",
                 (day.local_date,),
             )
         }
@@ -1266,13 +1572,15 @@ class Practice:
             for kind, *row in connection.execute(
                 """SELECT selection.kind, item.id, item.local_date, item.section_title,
                           item.snapshot_json, item.draft_text, item.draft_version,
-                          request.state, request.error
+                          CASE WHEN gap.item_id IS NOT NULL THEN 'self_reported_gap' ELSE request.state END,
+                          request.error
                    FROM practice_selections AS selection
                    JOIN practice_items AS item ON item.id = selection.item_id
                    LEFT JOIN practice_submissions AS submission ON submission.item_id = item.id
                    LEFT JOIN practice_revisions AS revision ON revision.item_id = item.id
                    LEFT JOIN grading_requests AS request
                      ON request.id = COALESCE(revision.current_request_id, submission.current_request_id)
+                   LEFT JOIN practice_gap_completions AS gap ON gap.item_id = item.id
                    WHERE selection.local_date = ?
                    ORDER BY selection.slot""",
                 (local_date,),
@@ -1286,6 +1594,7 @@ class Practice:
                    FROM practice_items AS item
                    WHERE trim(item.draft_text) <> ''
                      AND item.id NOT IN (SELECT item_id FROM practice_submissions)
+                     AND item.id NOT IN (SELECT item_id FROM practice_gap_completions)
                      AND NOT EXISTS (
                        SELECT 1 FROM practice_selections WHERE local_date = ? AND item_id = item.id
                    )
@@ -1305,19 +1614,23 @@ class Practice:
         submitted = [
             self._item(row)
             for row in connection.execute(
-                """SELECT item.id, item.local_date, item.section_title, item.snapshot_json,
-                          item.draft_text, item.draft_version, request.state, request.error
-                   FROM practice_submissions AS submission
-                   JOIN practice_items AS item ON item.id = submission.item_id
-                   LEFT JOIN practice_revisions AS revision ON revision.item_id = submission.item_id
-                   JOIN grading_requests AS request
+                """SELECT item.id, item.local_date, item.section_title,
+                          item.snapshot_json, item.draft_text, item.draft_version,
+                          CASE WHEN gap.item_id IS NOT NULL THEN 'self_reported_gap' ELSE request.state END,
+                          request.error
+                   FROM practice_items AS item
+                   LEFT JOIN practice_submissions AS submission ON submission.item_id = item.id
+                   LEFT JOIN practice_gap_completions AS gap ON gap.item_id = item.id
+                   LEFT JOIN practice_revisions AS revision ON revision.item_id = item.id
+                   LEFT JOIN grading_requests AS request
                      ON request.id = COALESCE(revision.current_request_id, submission.current_request_id)
-                   WHERE NOT EXISTS (
-                       SELECT 1 FROM practice_selections WHERE local_date = ? AND item_id = item.id
-                   )
-                   ORDER BY CASE WHEN revision.item_id IS NULL THEN submission.completed_at
-                                 ELSE request.created_at END DESC, item.id""",
-                (local_date,),
+                   WHERE (gap.completed_date >= ? OR submission.item_id IS NOT NULL)
+                     AND NOT EXISTS (
+                        SELECT 1 FROM practice_selections WHERE local_date = ? AND item_id = item.id
+                     )
+                   ORDER BY CASE WHEN revision.item_id IS NOT NULL THEN request.created_at
+                                 ELSE COALESCE(gap.completed_at, submission.completed_at) END DESC, item.id""",
+                (week_start.isoformat(), local_date),
             )
         ]
         recommended = sum(selection.kind in ("review", "variety") for selection in selections)

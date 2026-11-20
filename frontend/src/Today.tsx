@@ -50,6 +50,14 @@ type SaveState =
   | { kind: 'conflict'; saved: Draft }
   | { kind: 'submitted_elsewhere' }
 export type LeaveToday = LeaveEditor
+type HelpKind = 'hint' | 'explanation'
+type SupportView = {
+  itemId: string
+  hint?: string
+  explanation?: string
+  gapExplanation?: string
+  acknowledgementRequired?: boolean
+}
 
 const DATE_CHECK_MS = 60_000
 
@@ -84,6 +92,7 @@ const SESSION_GRADING_LABELS: Record<GradingStatus, string> = {
   failed_recoverable: 'Needs retry',
   ready_to_send: 'Ready to send',
   assessed: 'Assessed',
+  self_reported_gap: 'Self-reported gap',
 }
 
 function gradingLabel(item: PracticeItem) {
@@ -114,6 +123,41 @@ function findItem(session: Session, id: string) {
     ?? session.submitted.find(item => item.id === id)
 }
 
+/** Render locally stored teaching support once the API has recorded its use. */
+function SupportControls({ support, disabled, onHelp, onGap, onAcknowledgeGap }: {
+  support?: SupportView
+  disabled: boolean
+  onHelp: (kind: HelpKind) => void
+  onGap?: () => void
+  onAcknowledgeGap?: () => void
+}) {
+  return (
+    <section className="practice-support" aria-label="Learning support">
+      <div className="actions">
+        <button type="button" disabled={disabled} onClick={() => onHelp('hint')}>Show hint</button>
+        <button type="button" disabled={disabled} onClick={() => onHelp('explanation')}>Show explanation</button>
+        {onGap && <button type="button" disabled={disabled} onClick={onGap}>I don&apos;t know</button>}
+      </div>
+      {support?.hint && <div className="practice-support-content"><h3>Hint</h3><p>{support.hint}</p></div>}
+      {support?.explanation && <div className="practice-support-content"><h3>Explanation</h3><p>{support.explanation}</p></div>}
+      {support?.gapExplanation && (
+        <div className="practice-support-content">
+          <h3>Reference explanation</h3>
+          <p>{support.gapExplanation}</p>
+          {support.acknowledgementRequired && onAcknowledgeGap && (
+            <div className="actions">
+              <button className="primary" type="button" disabled={disabled} onClick={onAcknowledgeGap}>
+                Mark as completed
+              </button>
+              <p className="muted">This records an “I don&apos;t know” learning gap without sending an answer for grading.</p>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
 /** Manage a local editing buffer and switch questions only after every dirty edit is saved. */
 export function Today({ request, active, leaveToday }: {
   request: LocalRequest
@@ -132,9 +176,11 @@ export function Today({ request, active, leaveToday }: {
   const [copyStatus, setCopyStatus] = useState('')
   const [browsing, setBrowsing] = useState(false)
   const [initialSubmission, setInitialSubmission] = useState<SavedSubmission>()
+  const [support, setSupport] = useState<SupportView>()
   const feedbackLeave = useRef<LeaveEditor | null>(null)
   const lastStatus = useRef<{ itemId: string; status: GradingStatus }>(undefined)
   const reviewActionKeys = useRef(new Map<string, string>())
+  const gapActionKeys = useRef(new Map<string, string>())
   const operation = useRef(false)
   const operationVersion = useRef(0)
   const refreshAfterOperation = useRef(false)
@@ -243,6 +289,7 @@ export function Today({ request, active, leaveToday }: {
     setCopyStatus('')
     setReviewError('')
     setInitialSubmission(undefined)
+    setSupport(undefined)
   }
 
   function acknowledge(draft: Draft) {
@@ -301,6 +348,65 @@ export function Today({ request, active, leaveToday }: {
         kind: 'error', message: 'Could not confirm your submission. Your text is still here. You can submit the same answer again.',
       })
     }
+  }
+
+  async function revealHelp(kind: HelpKind) {
+    if (!editor) return
+    const itemId = editor.item.id
+    await run(async () => {
+      setActionError('')
+      try {
+        // The API commits the help event before responding, so content is never shown untracked.
+        const result = await request<{ content: string }>(`/api/practice/items/${itemId}/help/${kind}`, {
+          method: 'POST',
+        })
+        setSupport(current => current?.itemId === itemId
+          ? { ...current, [kind]: result.content }
+          : { itemId, [kind]: result.content })
+      } catch {
+        setActionError(`Could not save that ${kind}. It has not been shown; try again.`)
+      }
+    })
+  }
+
+  async function revealGap() {
+    if (!editor) return
+    await run(async () => {
+      setActionError('')
+      try {
+        const result = await request<{ item_id: string; explanation: string; acknowledgement_required: boolean }>(
+          `/api/practice/items/${editor.item.id}/gap/reveal`, { method: 'POST' },
+        )
+        setSupport({ itemId: result.item_id, gapExplanation: result.explanation,
+          acknowledgementRequired: result.acknowledgement_required })
+      } catch {
+        setActionError("Could not reveal the explanation. This question is still incomplete; try again.")
+      }
+    })
+  }
+
+  async function acknowledgeGap() {
+    if (!editor || support?.itemId !== editor.item.id || !support.acknowledgementRequired) return
+    await run(async () => {
+      setActionError('')
+      const key = gapActionKeys.current.get(editor.item.id) ?? crypto.randomUUID()
+      gapActionKeys.current.set(editor.item.id, key)
+      try {
+        const result = await request<{ submission: SavedSubmission; today: Session }>(
+          `/api/practice/items/${editor.item.id}/gap/acknowledge`, jsonOptions('POST', { idempotency_key: key }),
+        )
+        gapActionKeys.current.delete(editor.item.id)
+        setSession(result.today)
+        const item = findItem(result.today, editor.item.id) ?? { ...editor.item, submitted: true,
+          grading_status: 'self_reported_gap' as GradingStatus }
+        setEditor({ item, text: item.draft.text })
+        setInitialSubmission(result.submission)
+        setSupport(undefined)
+        heading.current?.focus()
+      } catch {
+        setActionError('Could not record completion yet. The explanation remains available; try again.')
+      }
+    })
   }
 
   async function run<T>(action: () => T | Promise<T>): Promise<T | undefined> {
@@ -563,9 +669,13 @@ export function Today({ request, active, leaveToday }: {
               {reviewError && <p className="error" role="alert">{reviewError}</p>}
             </header>
             {editor.item.submitted ? (
-              <PracticeFeedback key={editor.item.id} itemId={editor.item.id} request={request} active={active}
-                initial={initialSubmission} answerLimit={session.answer_limit} navigationPending={busy}
-                leaveEditor={feedbackLeave} onStatus={observeGradingStatus} onReviewsChanged={requestTodayRefresh} />
+              <>
+                <PracticeFeedback key={editor.item.id} itemId={editor.item.id} request={request} active={active}
+                  initial={initialSubmission} answerLimit={session.answer_limit} navigationPending={busy}
+                  leaveEditor={feedbackLeave} onStatus={observeGradingStatus} onReviewsChanged={requestTodayRefresh} />
+                <SupportControls support={support?.itemId === editor.item.id ? support : undefined}
+                  disabled={controlsDisabled} onHelp={revealHelp} />
+              </>
             ) : <div className="today-editor">
               <div className="today-editor-label">
                 <label htmlFor="practice-answer">Your answer</label>
@@ -603,6 +713,8 @@ export function Today({ request, active, leaveToday }: {
                   {saveState.kind === 'idle' && (dirty ? 'Unsaved changes' : editor.item.draft.version > 0 && 'Saved draft loaded.')}
                 </p>
               </div>
+              <SupportControls support={support?.itemId === editor.item.id ? support : undefined}
+                disabled={controlsDisabled} onHelp={revealHelp} onGap={revealGap} onAcknowledgeGap={acknowledgeGap} />
               {saveState.kind === 'error' && <p role="alert" tabIndex={-1} ref={saveProblem} className="error">{saveState.message}</p>}
               {saveState.kind === 'conflict' && (
                 <div className="today-conflict">
