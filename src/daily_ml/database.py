@@ -3,6 +3,7 @@
 import json
 import os
 import sqlite3
+import time
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
@@ -49,6 +50,25 @@ class Database:
             connection.execute(
                 "INSERT OR IGNORE INTO user_preferences VALUES (?, ?, ?)", (1, 0, "{}")
             )
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS daily_ml_backup_schema (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    schema_version INTEGER NOT NULL CHECK (schema_version > 0)
+                )
+            """)
+            connection.execute(
+                "INSERT OR IGNORE INTO daily_ml_backup_schema VALUES (?, ?)",
+                (1, BACKUP_SCHEMA_VERSION),
+            )
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS daily_ml_backup_tables (
+                    table_name TEXT PRIMARY KEY
+                )
+            """)
+            connection.executemany(
+                "INSERT OR IGNORE INTO daily_ml_backup_tables VALUES (?)",
+                (("user_preferences",), ("daily_ml_backup_schema",), ("daily_ml_backup_tables",)),
+            )
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version == 0:
                 connection.execute(f"PRAGMA user_version = {BACKUP_SCHEMA_VERSION}")
@@ -66,10 +86,9 @@ class Database:
             raise BackupError("The selected file is not a valid Daily ML backup (integrity check failed).")
         if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise BackupError("The selected backup has invalid record relationships and was not restored.")
-        preferences = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'user_preferences'"
-        ).fetchone()
-        if preferences is None:
+        required = {"user_preferences", "daily_ml_backup_schema", "daily_ml_backup_tables"}
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        if not required <= tables:
             raise BackupError("The selected file is not a valid Daily ML backup.")
         try:
             row = connection.execute(
@@ -77,8 +96,31 @@ class Database:
             ).fetchone()
             if row is None or not isinstance(row[0], int) or row[0] < 0 or not isinstance(json.loads(row[1]), dict):
                 raise ValueError
+            marker = connection.execute(
+                "SELECT schema_version FROM daily_ml_backup_schema WHERE singleton = 1"
+            ).fetchone()
+            if marker != (BACKUP_SCHEMA_VERSION,):
+                raise ValueError
+            recorded_tables = {
+                row[0] for row in connection.execute("SELECT table_name FROM daily_ml_backup_tables")
+            }
+            if not required <= recorded_tables or not recorded_tables <= tables:
+                raise ValueError
         except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
             raise BackupError("The selected file is not a valid Daily ML backup.") from None
+
+    @staticmethod
+    def _online_backup(source: sqlite3.Connection, target: sqlite3.Connection) -> None:
+        """Copy a SQLite database while bounding busy/locked retry time."""
+        deadline = time.monotonic() + SQLITE_WAIT_SECONDS
+
+        def check_deadline(_: int, __: int, ___: int) -> None:
+            if time.monotonic() >= deadline:
+                raise BackupError(
+                    "SQLite remained busy while creating a backup. Close the other Daily ML process and retry."
+                )
+
+        source.backup(target, pages=64, progress=check_deadline, sleep=0.05)
 
     @staticmethod
     def _fsync(path: Path) -> None:
@@ -105,7 +147,7 @@ class Database:
         temporary = Path(temporary_name)
         try:
             with self.connect() as source, closing(sqlite3.connect(temporary)) as target:
-                source.backup(target)
+                self._online_backup(source, target)
                 self._validate_connection(target)
             os.chmod(temporary, 0o600)
             self._fsync(temporary)
@@ -134,6 +176,23 @@ class Database:
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         return self._backup_to(self.backup_dir / f"daily-ml-backup-{timestamp}-{uuid4().hex}.sqlite3")
 
+    @staticmethod
+    def record_backup_tables(connection: sqlite3.Connection) -> None:
+        """Record the durable tables installed in this database transaction.
+
+        Parameters
+        ----------
+        connection : sqlite3.Connection
+            Active schema-initialization transaction. The recorded manifest lets
+            backup validation reject a syntactically valid but truncated export.
+        """
+        tables = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        connection.executemany(
+            "INSERT OR IGNORE INTO daily_ml_backup_tables VALUES (?)", tables
+        )
+
     @classmethod
     def validate_backup(cls, path: Path) -> None:
         """Validate a backup without changing the active database.
@@ -149,7 +208,7 @@ class Database:
             If the candidate is missing, corrupt, incomplete, or incompatible.
         """
         try:
-            with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as connection:
+            with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
                 cls._validate_connection(connection)
         except (OSError, sqlite3.Error, BackupError) as error:
             if isinstance(error, BackupError):
@@ -176,26 +235,70 @@ class Database:
         """
         self.validate_backup(backup)
         staging = self.path.with_name(f".{self.path.name}.{uuid4().hex}.restore-preparing")
+        pre_restore: Path | None = None
+        replaced = False
         try:
-            with closing(sqlite3.connect(f"file:{backup}?mode=ro", uri=True)) as source, closing(sqlite3.connect(staging)) as target:
-                source.backup(target)
+            with closing(sqlite3.connect(backup.resolve().as_uri() + "?mode=ro", uri=True)) as source, closing(sqlite3.connect(staging)) as target:
+                self._online_backup(source, target)
                 self._validate_connection(target)
             os.chmod(staging, 0o600)
             self._fsync(staging)
             timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
             pre_restore = self.backup_dir / f"daily-ml-pre-restore-{timestamp}-{uuid4().hex}.sqlite3"
             self._backup_to(pre_restore)
+            self._settle_live_sidecars()
             os.replace(staging, self.path)
+            replaced = True
             self._fsync(self.path)
             self.validate_backup(self.path)
             return pre_restore
         except (OSError, sqlite3.Error, BackupError) as error:
             staging.unlink(missing_ok=True)
+            if replaced and pre_restore is not None:
+                if self._restore_pre_replace_state(pre_restore):
+                    raise BackupError(
+                        "Restore could not complete after replacing the database; the verified pre-restore "
+                        "copy was atomically rolled back and remains in backups."
+                    ) from None
+                raise BackupError(
+                    "Restore could not complete after replacing the database. The verified pre-restore copy "
+                    f"is retained at {pre_restore}; restore it manually before reopening Daily ML."
+                ) from None
             if isinstance(error, BackupError):
                 raise
             raise BackupError(
-                "Could not restore the backup. Your existing database was kept; check disk space and permissions."
+                "Could not complete restore. The verified pre-restore copy is retained in backups; "
+                "check disk space and permissions before retrying."
             ) from None
+
+    def _settle_live_sidecars(self) -> None:
+        """Checkpoint WAL data before an atomic live-file replacement."""
+        with closing(sqlite3.connect(self.path, timeout=SQLITE_WAIT_SECONDS)) as connection:
+            connection.execute("PRAGMA busy_timeout = 3000")
+            checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if checkpoint is None or checkpoint[0] != 0:
+                raise BackupError("SQLite is busy; close the running app before restoring a backup.")
+            journal_mode = connection.execute("PRAGMA journal_mode = DELETE").fetchone()
+            if journal_mode != ("delete",):
+                raise BackupError("SQLite could not safely settle its journal before restore.")
+
+    def _restore_pre_replace_state(self, pre_restore: Path) -> bool:
+        """Try to atomically return the verified pre-restore data to the live path."""
+        rollback = self.path.with_name(f".{self.path.name}.{uuid4().hex}.restore-rollback")
+        try:
+            with closing(sqlite3.connect(pre_restore.resolve().as_uri() + "?mode=ro", uri=True)) as source, closing(sqlite3.connect(rollback)) as target:
+                self._online_backup(source, target)
+                self._validate_connection(target)
+            os.chmod(rollback, 0o600)
+            self._fsync(rollback)
+            os.replace(rollback, self.path)
+            self._fsync(self.path)
+            self.validate_backup(self.path)
+            return True
+        except (OSError, sqlite3.Error, BackupError):
+            return False
+        finally:
+            rollback.unlink(missing_ok=True)
 
     @contextmanager
     def connect(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:

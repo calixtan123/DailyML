@@ -326,6 +326,7 @@ class Practice:
             initialize_reviews(connection, self.review_intervals)
             initialize_versions(connection)
             initialize_disputes(connection)
+            self.database.record_backup_tables(connection)
 
     def _migrate_practice_credits(self, connection: sqlite3.Connection) -> None:
         """Move legacy credit rows to the item-level foreign key schema.

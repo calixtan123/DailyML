@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from daily_ml.database import BackupError, Database
+from daily_ml.practice import Practice
 from daily_ml import cli
 
 
@@ -41,6 +42,29 @@ def test_validate_backup_rejects_corrupt_or_newer_database(tmp_path):
         Database.validate_backup(backup)
 
 
+def test_validate_backup_rejects_a_truncated_schema_with_valid_preferences(tmp_path):
+    """A SQLite file with an intact preferences table is not enough to restore."""
+    source = Database(tmp_path / "source")
+    backup = source.create_backup()
+    with sqlite3.connect(backup) as connection:
+        connection.execute("DROP TABLE daily_ml_backup_schema")
+
+    with pytest.raises(BackupError, match="valid Daily ML backup"):
+        Database.validate_backup(backup)
+
+
+def test_validate_backup_rejects_a_missing_registered_learning_table(tmp_path):
+    """A backup cannot silently omit a practice table installed by this app."""
+    source = Database(tmp_path / "source")
+    Practice(source, answer_limit=8_000)
+    backup = source.create_backup()
+    with sqlite3.connect(backup) as connection:
+        connection.execute("DROP TABLE practice_disputes")
+
+    with pytest.raises(BackupError, match="valid Daily ML backup"):
+        Database.validate_backup(backup)
+
+
 def test_restore_keeps_pre_restore_copy_and_replaces_database_atomically(tmp_path):
     """Stopped-app restore preserves rollback material before replacing live data."""
     data_dir = tmp_path / "Live Data"
@@ -56,6 +80,32 @@ def test_restore_keeps_pre_restore_copy_and_replaces_database_atomically(tmp_pat
     assert Database(data_dir).get_preferences().values == {"timezone": "UTC"}
     with sqlite3.connect(pre_restore) as connection:
         assert connection.execute("SELECT settings_json FROM user_preferences").fetchone() == ('{"timezone": "Europe/London"}',)
+
+
+def test_restore_rolls_back_when_final_durability_check_fails(tmp_path, monkeypatch):
+    """A failure after replacement restores the pre-restore learning database."""
+    live = Database(tmp_path / "live")
+    live.save_preferences({"timezone": "Europe/London"}, expected_version=0)
+    source = Database(tmp_path / "source")
+    source.save_preferences({"timezone": "UTC"}, expected_version=0)
+    backup = source.create_backup()
+    original_fsync = Database._fsync
+    failed_once = False
+
+    def fail_once_after_replace(path):
+        nonlocal failed_once
+        if path == live.path and not failed_once:
+            failed_once = True
+            raise OSError("durability failure")
+        original_fsync(path)
+
+    monkeypatch.setattr(Database, "_fsync", staticmethod(fail_once_after_replace))
+
+    with pytest.raises(BackupError, match="rolled back"):
+        live.restore_backup(backup)
+
+    assert Database(live.path.parent).get_preferences().values == {"timezone": "Europe/London"}
+    assert list(live.backup_dir.glob("daily-ml-pre-restore-*.sqlite3"))
 
 
 def test_restore_rejects_foreign_key_violation_without_changing_live_data(tmp_path):
@@ -93,6 +143,37 @@ def test_restore_cli_uses_configured_directory_with_spaces_and_reports_recovery_
     assert "Pre-restore copy" in capsys.readouterr().out
 
 
+def test_restore_accepts_backup_path_with_uri_special_characters(tmp_path):
+    """Restore treats a literal backup filename, not a hand-built SQLite URI."""
+    live = Database(tmp_path / "live")
+    source = Database(tmp_path / "source")
+    source.save_preferences({"timezone": "UTC"}, expected_version=0)
+    backup = tmp_path / "backup #1? 100%.sqlite3"
+    with sqlite3.connect(source.path) as source_connection, sqlite3.connect(backup) as target_connection:
+        source_connection.backup(target_connection)
+
+    live.restore_backup(backup)
+
+    assert live.get_preferences().values == {"timezone": "UTC"}
+
+
+def test_busy_online_backup_leaves_no_partial_file_and_keeps_app_usable(tmp_path, monkeypatch):
+    """A bounded SQLite-busy failure cannot publish a partial backup or damage learning data."""
+    live = Database(tmp_path / "live")
+    live.save_preferences({"timezone": "UTC"}, expected_version=0)
+
+    def busy_backup(source, target):
+        raise BackupError("SQLite remained busy while creating a backup.")
+
+    monkeypatch.setattr(Database, "_online_backup", staticmethod(busy_backup))
+
+    with pytest.raises(BackupError, match="busy"):
+        live.create_backup()
+
+    assert not list(live.backup_dir.glob("*.preparing"))
+    assert live.get_preferences().values == {"timezone": "UTC"}
+
+
 def test_restore_cli_refuses_to_replace_data_owned_by_running_app(tmp_path, capsys):
     """The restore command cannot race the launcher that owns the installation."""
     data_dir = tmp_path / "live"
@@ -105,6 +186,18 @@ def test_restore_cli_refuses_to_replace_data_owned_by_running_app(tmp_path, caps
 
     assert raised.value.code == 1
     assert "already running" in capsys.readouterr().err
+
+
+def test_startup_ignores_an_interrupted_restore_preparation_file(tmp_path):
+    """An incomplete sibling staging file never becomes the live database on restart."""
+    live = Database(tmp_path / "live")
+    live.save_preferences({"timezone": "UTC"}, expected_version=0)
+    staging = live.path.with_name(f".{live.path.name}.interrupted.restore-preparing")
+    staging.write_bytes(b"incomplete")
+
+    restarted = Database(live.path.parent)
+
+    assert restarted.get_preferences().values == {"timezone": "UTC"}
 
 
 def _config(root: Path, data_dir: Path) -> Path:
