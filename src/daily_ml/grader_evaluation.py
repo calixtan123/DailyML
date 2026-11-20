@@ -10,11 +10,11 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib import metadata
 from importlib.resources import files
 from typing import Iterable
 from uuid import uuid4
 
-import openai
 from pydantic import BaseModel, ConfigDict, Field
 
 from .bank import validate_bank
@@ -119,13 +119,7 @@ def load_fixed_cases() -> tuple[EvaluationCase, ...]:
 def _context(case: EvaluationCase) -> GradingContext:
     """Freeze one fixture answer against its reviewed starter-bank snapshot."""
     question = next(item for item in validate_bank().questions if item.id == case.question_id)
-    return GradingContext(
-        version=f"{question.id}-v{question.version}", question=question.prompt, answer=case.answer,
-        reference=question.reference_explanation,
-        criteria=[{"id": item.id, "description": item.description, "weight": item.weight} for item in question.criteria],
-        critical_misconceptions={f"misconception-{index}": text for index, text in enumerate(question.critical_misconceptions, 1)},
-        sources={source.id: source.url for source in question.sources},
-    )
+    return GradingContext.from_question_snapshot(question.model_dump_json(), case.answer)
 
 
 class EvaluationRunner:
@@ -378,5 +372,24 @@ class EvaluationRunner:
 
 
 def dependency_versions() -> dict[str, str]:
-    """Return public reproducibility metadata without reading credentials."""
-    return {"prompt": PROMPT_VERSION, "schema": SCHEMA_VERSION, "sdk": openai.__version__, "auth": "oauth-pkce-v1"}
+    """Return installed package and protocol versions for a reproducible run.
+
+    Returns
+    -------
+    dict of str to str
+        Public app, SDK, auth dependency, prompt and schema versions.
+
+    Raises
+    ------
+    importlib.metadata.PackageNotFoundError
+        If the app or a required distribution has no installed metadata.
+    """
+    return {
+        "prompt": PROMPT_VERSION,
+        "schema": SCHEMA_VERSION,
+        "app": metadata.version("daily-ml-practice"),
+        "sdk": metadata.version("openai"),
+        "auth": "oauth-pkce-v1",
+        "pyjwt": metadata.version("PyJWT"),
+        "httpx": metadata.version("httpx"),
+    }

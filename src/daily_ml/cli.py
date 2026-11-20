@@ -9,6 +9,7 @@ import sqlite3
 import webbrowser
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from importlib.metadata import PackageNotFoundError
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -224,6 +225,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     except KeyboardInterrupt:
         return 0
+    except PackageNotFoundError:
+        parser.exit(1, "Daily ML Practice: Could not read installed package versions. "
+                       "Reinstall Daily ML Practice and its dependencies.\n")
     except (BankError, ConfigError, LaunchError, StorageError) as error:
         parser.exit(1, f"Daily ML Practice: {error}\n")
     except (OSError, sqlite3.Error):

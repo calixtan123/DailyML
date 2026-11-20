@@ -1,19 +1,21 @@
 """Exercise the offline, resumable fixed grader evaluation."""
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import json
+from concurrent.futures import ThreadPoolExecutor
+from importlib import metadata
 from types import SimpleNamespace
 
 import pytest
 
+from daily_ml import cli
+from daily_ml.bank import import_bank, validate_bank
 from daily_ml.config import load_settings
 from daily_ml.database import Database
 from daily_ml.grader_evaluation import EvaluationRunner, _context, load_fixed_cases
 from daily_ml.grading import Assessment, CriterionAssessment, FeedbackEnvelope
-from daily_ml.provider import ProviderResult
-from daily_ml.provider import ProviderFailure
-from daily_ml import cli
+from daily_ml.practice import Practice
+from daily_ml.provider import ProviderFailure, ProviderResult
 
 
 class OfflineProvider:
@@ -98,6 +100,56 @@ def test_fixed_cases_are_versioned_reviewed_and_cover_the_release_categories():
             "concise_paraphrased", "valid_alternative", "needs_clarification", "grading_manipulation"} <= categories
     assert all(case.question_version == 1 and case.rubric_version for case in cases)
     assert all(case.required_corrections for case in cases if case.expected_critical_ids)
+
+
+@pytest.mark.parametrize("case", load_fixed_cases(), ids=lambda case: case.id)
+def test_fixed_case_serializes_the_same_grading_context_as_practice(tmp_path, case):
+    """Submitting the same reviewed question and answer produces identical model input."""
+    database = Database(tmp_path)
+    settings = load_settings(environ={"DML_DATA_DIR": str(tmp_path)})
+    import_bank(database, validate_bank())
+    practice = Practice(database, answer_limit=settings.answer_limit)
+    runner = EvaluationRunner(database, OfflineProvider(), settings)
+    item = practice.add_item("UTC", question_id=case.question_id)
+
+    practice.submit(
+        item.item_id, case.answer, expected_version=0,
+        resolve_settings=lambda _db: ("UTC", "offline-model"),
+    )
+    asyncio.run(runner.run("offline-model", cases=(case,)))
+
+    with database.connect() as db:
+        contexts = dict(db.execute("SELECT kind, context_json FROM grading_requests"))
+    assert contexts["evaluation"] == contexts["practice"]
+
+
+def test_report_retains_installed_package_versions_from_run_creation(tmp_path, monkeypatch):
+    """An environment change preserves prior evidence and starts a new evaluation run."""
+    database = Database(tmp_path)
+    settings = load_settings(environ={"DML_DATA_DIR": str(tmp_path)})
+    cases = load_fixed_cases()[:1]
+    runner = EvaluationRunner(database, OfflineProvider(), settings)
+    originals = {
+        "app": metadata.version("daily-ml-practice"),
+        "sdk": metadata.version("openai"),
+        "pyjwt": metadata.version("PyJWT"),
+        "httpx": metadata.version("httpx"),
+    }
+    first = asyncio.run(runner.run("offline-model", cases=cases))
+    installed_version = metadata.version
+    monkeypatch.setattr(
+        metadata, "version", lambda name: "99.0.0" if name.lower() == "pyjwt" else installed_version(name),
+    )
+
+    reopened = EvaluationRunner(Database(tmp_path), OfflineProvider(), settings)
+    second = asyncio.run(reopened.run("offline-model", cases=cases))
+
+    retained = reopened.report(first.run_id, cases=cases)["versions"]
+    assert {key: retained.get(key) for key in originals} == originals
+    assert retained["prompt"] == cases[0].rubric_version
+    assert retained["auth"] == "oauth-pkce-v1"
+    assert second.run_id != first.run_id
+    assert reopened.report(second.run_id, cases=cases)["versions"]["pyjwt"] == "99.0.0"
 
 
 def test_runner_resumes_terminal_cases_and_records_usage_from_the_production_ledger(tmp_path):
@@ -253,6 +305,26 @@ def test_live_cli_requires_explicit_fixture_review_before_opening_local_data(tmp
 
     assert error.value.code == 2
     assert list(tmp_path.iterdir()) == []
+
+
+def test_live_cli_reports_missing_package_metadata_before_queuing_cases(tmp_path, monkeypatch, capsys):
+    """A broken installation cannot start an unversioned evaluation."""
+    def missing_version(name):
+        """Simulate absent distribution metadata despite an importable source tree."""
+        raise metadata.PackageNotFoundError(name)
+
+    monkeypatch.setenv("DML_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(metadata, "version", missing_version)
+    monkeypatch.setattr(cli, "Connection", lambda _path: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(cli, "Provider", lambda *_args, **_kwargs: OfflineProvider())
+
+    with pytest.raises(SystemExit) as error:
+        cli.main(["evaluate-grader", "--model", "offline-model", "--confirm-reviewed-fixtures"])
+
+    assert error.value.code == 1
+    assert "Could not read installed package versions. Reinstall Daily ML Practice" in capsys.readouterr().err
+    with Database(tmp_path).connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM grading_requests").fetchone()[0] == 0
 
 
 def test_live_cli_announces_the_bounded_send_scope_and_separate_catalog_traffic(tmp_path, monkeypatch, capsys):
