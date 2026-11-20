@@ -54,9 +54,24 @@ Open **History** to find saved practice by section or practice date. Select an i
 
 ## Settings and local data
 
-The default directory is `~/Library/Application Support/Daily ML Practice/`. It contains the SQLite database for preferences, imported question versions, saved recommendations, question snapshots and drafts, plus rotating operational logs and a protected `credentials/` directory. A consistent SQLite backup includes the saved practice records. Keep credentials out of SQLite backups. Signing out retains SQLite data and the saved account registration and installation identity.
+The default directory is `~/Library/Application Support/Daily ML Practice/`. It contains the SQLite database for preferences, imported question versions, saved recommendations, question snapshots and drafts, plus rotating operational logs, verified `backups/`, and a protected `credentials/` directory. Signing out retains SQLite data and the saved account registration and installation identity.
 
-On the first upgrade to self-reported gaps, the app verifies a private `daily-ml-before-gap-upgrade-*.sqlite3` backup before migrating existing practice credits. If launch reports a local data error during the upgrade, the migration rolls back. Check available space and permissions in the data directory before retrying. Keep the backup if you need to recover the pre-upgrade records.
+### Backup and restore
+
+In **Settings**, choose **Back up learning data** to download a verified SQLite copy of the authoritative learning database. It includes editable preferences, imported question versions, saved practice records, answer snapshots, help use and self-reported gap completions. SQLite creates the copy while the app is running, then Daily ML checks database integrity and record relationships before offering the download. A retained copy is also stored under `backups/` in the data directory.
+
+Backups deliberately exclude the protected `credentials/` directory, including ChatGPT access and refresh tokens. Keep downloaded backups somewhere private: learning answers and preferences are personal data.
+
+To restore a backup, first stop every Daily ML Practice launcher using that data directory (press Ctrl+C in its terminal). Then run the stopped-app command; quote any path containing spaces:
+
+```sh
+daily-ml restore "/path/to/daily-ml-learning-backup.sqlite3"
+daily-ml restore "/path with spaces/daily-ml-learning-backup.sqlite3" --config "/path with spaces/config.toml"
+```
+
+Restore validates the selected SQLite file in a temporary sibling file, creates and verifies a `daily-ml-pre-restore-*.sqlite3` copy of the current database, then atomically replaces the live database. If validation, permissions, space, or replacement fails, the existing live database remains in place. Keep the printed pre-restore copy until you have checked the restored records. If the command says the app is already running, return to its browser tab or stop that launcher before retrying. If a machine interruption leaves a `*.restore-preparing` file in the data directory, do not open it as the live database; restart Daily ML, which continues to use the complete `daily-ml.sqlite3` file.
+
+On the first upgrade to self-reported gaps, the app verifies a private backup in `backups/` before migrating existing practice credits. The migration itself is transactional: if it cannot complete, SQLite rolls it back and the pre-upgrade backup remains available. Check available space and permissions in the data directory before retrying.
 
 Configuration loads packaged defaults, saved SQLite preferences, installation TOML, then `DML_` environment overrides. The launcher resolves the data directory before it opens SQLite. Settings shows whether the timezone is controlled by an override.
 
