@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { expect, test } from '@playwright/test'
 
-test('Two tabs complete one saved original after London midnight and reopen feedback offline',
+test('Two tabs complete one original after London midnight and reopen an offline revision the next day',
   async ({ page, context }) => {
     const beforeMidnight = '2026-03-29T22:58:00+00:00'
     const afterMidnight = '2026-03-29T23:01:00+00:00'
@@ -99,7 +99,7 @@ test('Two tabs complete one saved original after London midnight and reopen feed
       await page.reload()
       const session = page.getByRole('complementary', { name: 'Today’s session' })
       await expect(session.getByRole('button', { name: title })).toHaveCount(2)
-      const submitted = session.getByRole('button', { name: `${title} Assessed`, exact: true })
+      const submitted = session.getByRole('button', { name: `${title} ${original.local_date} · Assessed`, exact: true })
       await submitted.click()
       await expect(page.getByText('Grade 3 of 3')).toBeVisible()
       await expect(page.getByText('Give a concrete example.')).toBeVisible()
@@ -111,11 +111,51 @@ test('Two tabs complete one saved original after London midnight and reopen feed
         await page.setViewportSize({ width, height: 900 })
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
       }
+      await page.setViewportSize({ width: 1440, height: 900 })
       const readsDone = submissionReads
       await page.clock.runFor(1_200)
       expect(submissionReads).toBe(readsDone)
       const usage = await page.evaluate(async () => (await fetch('/api/usage')).json())
       expect(usage).toEqual({ attempts_24h: 1 })
+
+      const beforeRevision = await (await page.request.post(`${origin}/api/practice/today`, { headers })).json()
+      const concept = original.question.concept_id
+      expect(beforeRevision.reviews[concept].due_date).toBe('2026-03-31')
+      const nextDay = '2026-03-30T23:01:00+00:00'
+      await writeFile(clockFile, nextDay)
+      await page.clock.setSystemTime(new Date(nextDay))
+      await page.reload()
+      await expect(page.getByText('No practice yet today')).toBeVisible()
+      const nextDayUsage = await (await page.request.get(`${origin}/api/usage`)).json()
+      expect(nextDayUsage).toEqual({ attempts_24h: 0 })
+      await submitted.click()
+      await page.getByRole('button', { name: 'Revise answer', exact: true }).click()
+      const revised = 'Use a held-out test set for the final evaluation and tune on separate data.'
+      await page.getByRole('textbox', { name: 'Revised answer', exact: true }).fill(revised)
+      await page.getByRole('button', { name: 'Send revised answer', exact: true }).click()
+
+      const readSubmission = async () => {
+        const response = await page.request.get(`${origin}/api/practice/items/${original.id}/submission`)
+        expect(response.ok()).toBe(true)
+        return response.json()
+      }
+      await expect.poll(async () => (await readSubmission()).revision?.request.state).toBe('assessed')
+      const saved = await readSubmission()
+      expect(saved.text).toBe(answer)
+      expect(saved.revision.assessed_text).toBe(revised)
+      expect(saved.revision.supported).toBe(true)
+      const revisionUsage = await (await page.request.get(`${origin}/api/usage`)).json()
+      expect(revisionUsage).toEqual({ attempts_24h: 1 })
+      const afterRevision = await (await page.request.post(`${origin}/api/practice/today`, { headers })).json()
+      expect(afterRevision.completion_counts).toEqual(beforeRevision.completion_counts)
+      expect(afterRevision.reviews[concept]).toEqual(beforeRevision.reviews[concept])
+
+      await page.reload()
+      await submitted.click()
+      const article = page.getByRole('article')
+      await expect(article.getByText(revised, { exact: true })).toBeVisible()
+      await expect(article.getByText('Grade 3 of 3', { exact: true })).toHaveCount(2)
+      await expect(article.getByRole('button', { name: 'Revise answer', exact: true })).toHaveCount(0)
     } finally {
       await writeFile(gate, 'cleanup')
       if (child.pid && child.exitCode === null && child.signalCode === null) {

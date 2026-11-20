@@ -36,6 +36,10 @@ After signing in, choose a **Grading model** from your account's list. Read the 
 
 Settings shows the model's feedback and a local grade from 0 to 3, or its request for clarification. **Model attempts in the last 24 hours** counts this installation's outbound and uncertain attempts. If a model rejects structured output, **Retry in JSON mode** authorizes another attempt. The test leaves your practice history untouched. Live account verification is pending. [Verification record](docs/DML-2-verification.md)
 
+## Clarify or revise a practice answer
+
+When feedback asks for clarification, edit the clarified answer and send it from the saved practice item. After assessment, **Revise answer** lets you submit one assisted revision and compare both answers and their feedback. You can save an edit locally before sending it. Clarification and revision preserve the original answer and completion credit. The eventual original assessment sets the next review date. A revision leaves that schedule in place.
+
 ## Settings and local data
 
 The default directory is `~/Library/Application Support/Daily ML Practice/`. It contains the SQLite database for preferences, imported question versions, saved recommendations, question snapshots and drafts, plus rotating operational logs and a protected `credentials/` directory. A consistent SQLite backup includes the saved practice records. Keep credentials out of SQLite backups. Signing out retains SQLite data and the saved account registration and installation identity.

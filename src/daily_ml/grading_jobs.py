@@ -62,6 +62,10 @@ def public_request(row: sqlite3.Row) -> dict:
     result["reference"] = {key: context[key] for key in ("question", "answer", "sources")}
     result["usage"] = json.loads(row["usage_json"]) if row["usage_json"] else None
     if row["kind"] == "practice":
+        if "submission_version_id" in row.keys():
+            result.update(
+                submission_version_id=row["submission_version_id"], role=row["role"], supported=bool(row["supported"]),
+            )
         result["model_id"] = row["model_id"] or None
         status = practice_grading_status(row["state"], row["error"])
         result["can_send"] = status == "ready_to_send"
@@ -223,6 +227,8 @@ class GradingJobs:
         with self.database.connect() as db:
             db.row_factory = sqlite3.Row
             row = db.execute("SELECT * FROM grading_requests WHERE id=?", (request_id,)).fetchone()
+            if row is not None and row["kind"] == "practice":
+                row = db.execute("SELECT * FROM practice_evaluated_requests WHERE id=?", (request_id,)).fetchone()
             return public_request(row) if row else None
 
     def latest_connection_test(self) -> dict | None:

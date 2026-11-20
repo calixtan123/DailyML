@@ -147,7 +147,9 @@ input { background: var(--input); min-width: 0; width: 180px; }
 }
 .practice-credit { color: var(--muted); }
 .practice-feedback { display: grid; gap: 12px; }
-.practice-feedback h4 { margin: 12px 0 4px; font-size: 15px; }
+.practice-attempt { display: grid; gap: 8px; }
+.practice-attempt + .practice-attempt { border-top: 1px solid var(--line); padding-top: 12px; }
+.practice-feedback h4, .practice-feedback h5 { margin: 12px 0 4px; font-size: 15px; }
 .practice-feedback summary { cursor: pointer; min-height: 44px; padding-block: 10px; color: var(--accent); }
 .practice-original { white-space: pre-wrap; }
 .practice-clarification .actions { margin-top: 8px; }

@@ -332,6 +332,361 @@ def test_clarification_draft_survives_restore_and_cannot_be_overwritten_or_sent_
     assert client.get(f"{base}/submission").json()["clarification_draft"] == {"text": draft, "version": 0}
 
 
+def _needs_clarification(explanation):
+    """Return a schema-valid clarification at the external transport boundary."""
+    import json
+
+    return response_stream(terminal(content=[{
+        "type": "output_text", "annotations": [],
+        "text": json.dumps({"feedback": {"status": "needs_clarification", "explanation": explanation}}),
+    }]))
+
+
+def test_multiple_clarifications_preserve_exact_versions_and_one_review(learner):
+    client, headers, db, _ = learner
+    _configure_model(db)
+    calls = []
+
+    def assess(outbound):
+        calls.append(outbound)
+        if len(calls) <= 2:
+            return _needs_clarification(f"Explain part {len(calls)}.")
+        return response_stream(_valid_terminal(outbound))
+
+    client.app.state.grading.provider = provider(assess)
+    item_id = _today(client, headers)["selections"][0]["item"]["id"]
+    _submit(client, headers, item_id, "First answer.")
+    url = f"/api/practice/items/{item_id}/submission"
+    first = client.get(url).json()
+    _retry(client, headers, item_id, first["request"]["id"], "Second answer.")
+    second = client.get(url).json()
+    _retry(client, headers, item_id, second["request"]["id"], "Third answer.")
+    final = client.get(url).json()
+
+    versions = final.get("versions", [])
+    assert [(v["text"], v["kind"], v["role"], v["supported"]) for v in versions] == [
+        ("First answer.", "initial", "original", False),
+        ("Second answer.", "clarification", "original", False),
+        ("Third answer.", "clarification", "original", False),
+    ]
+    assert [v["request"]["feedback"]["explanation"] for v in versions[:2]] == [
+        "Explain part 1.", "Explain part 2.",
+    ]
+    assert [v["parent_version_id"] for v in versions] == [None, versions[0]["id"], versions[1]["id"]]
+    assert final["submission_version_id"] == versions[2]["id"]
+    assert client.get(f"/api/requests/{final['request']['id']}").json()["submission_version_id"] == versions[2]["id"]
+    assert client.get("/api/usage").json() == {"attempts_24h": 3}
+    with db.connect() as connection:
+        assert connection.execute("SELECT grading_request_id FROM review_evidence").fetchall() == [
+            (final["request"]["id"],),
+        ]
+
+
+def test_one_assisted_revision_keeps_credit_and_schedule_through_retry_and_backup(learner, tmp_path):
+    client, headers, db, instants = learner
+    _configure_model(db)
+    calls = []
+
+    def assess(outbound):
+        calls.append(outbound)
+        if len(calls) == 2:
+            return httpx.Response(429, json={"error": {"code": "subscription_sharing_usage_limit_exceeded"}})
+        return response_stream(_valid_terminal(outbound))
+
+    client.app.state.grading.provider = provider(assess)
+    item_id = _today(client, headers)["selections"][0]["item"]["id"]
+    base = f"/api/practice/items/{item_id}"
+    original_text = "Use a held-out test set."
+    _submit(client, headers, item_id, original_text)
+    original = client.get(f"{base}/submission").json()
+    with db.connect() as connection:
+        schedule = connection.execute("SELECT * FROM concept_review_state").fetchall()
+    instants[0] = datetime(2026, 4, 8, 12, tzinfo=UTC)
+    assert item_id in {item["id"] for item in _today(client, headers)["submitted"]}
+    action = {"request_id": original["request"]["id"], "version": 0, "text": "Use nested evaluation."}
+    draft = client.put(f"{base}/revision-draft", headers=headers, json=action)
+    assert draft.status_code == 200
+    assert client.get(f"{base}/submission").json()["revision_draft"] == {"text": action["text"], "version": 1}
+    stale = {**action, "text": "Stale tab text."}
+    for response in [
+        client.put(f"{base}/revision-draft", headers=headers, json=stale),
+        client.post(f"{base}/revise", headers=headers, json=stale),
+    ]:
+        assert response.status_code == 409
+        assert response.json()["saved"] == draft.json()
+    action["version"] = 1
+    assert client.post(f"{base}/revise", headers=headers, json=action).status_code == 202
+    failed = client.get(f"{base}/submission").json()
+    assert failed["revision"]["request"]["state"] == "awaiting_allowance"
+    assert failed["revision"]["supported"] is True
+    assert _retry(client, headers, item_id, failed["revision"]["request"]["id"]).status_code == 202
+    result = client.get(f"{base}/submission").json()
+    revision = result["revision"]
+    assert revision["request"]["state"] == "assessed"
+    assert revision["submission_version_id"] == failed["revision"]["submission_version_id"]
+    assert result["request"] == original["request"]
+    assert result["assessed_text"] == original_text
+    assert revision["assessed_text"] == action["text"]
+    assert result["revision_draft"] is None
+    assert client.post(f"{base}/revise", headers=headers, json=action).status_code == 202
+    response = client.post(f"{base}/revise", headers=headers, json={**action, "text": "Second revision."})
+    assert response.status_code == 409
+    assert result["versions"][-1]["parent_version_id"] == original["submission_version_id"]
+    assert client.get("/api/usage").json() == {"attempts_24h": 3}
+    assert item_id in {item["id"] for item in _today(client, headers)["submitted"]}
+    instants[0] = datetime(2026, 4, 20, 12, tzinfo=UTC)
+    still_openable = {item["id"]: item["grading_status"] for item in _today(client, headers)["submitted"]}
+    assert still_openable[item_id] == "assessed"
+
+    restored = Database(tmp_path / "restored-revision")
+    with db.connect() as source, restored.connect() as destination:
+        source.backup(destination)
+    practice = Practice(restored, answer_limit=8000, clock=lambda: instants[0])
+    assert practice.submission(item_id) == result
+    with restored.connect() as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("SELECT * FROM concept_review_state").fetchall() == schedule
+        assert connection.execute("SELECT local_date FROM practice_credits").fetchall() == [("2026-03-28",)]
+        assert connection.execute("SELECT COUNT(*) FROM review_evidence").fetchone() == (1,)
+
+
+def test_competing_clarifications_and_revisions_commit_only_one_action(learner):
+    client, headers, db, _ = learner
+    _configure_model(db)
+    calls = []
+
+    def assess(outbound):
+        calls.append(outbound)
+        if len(calls) == 1:
+            return _needs_clarification("Explain how the test set is used.")
+        return response_stream(_valid_terminal(outbound))
+
+    client.app.state.grading.provider = provider(assess)
+    item_id = _today(client, headers)["selections"][0]["item"]["id"]
+    base = f"/api/practice/items/{item_id}"
+    _submit(client, headers, item_id, "A test set is useful.")
+    original = client.get(f"{base}/submission").json()
+    original_request_id = original["request"]["id"]
+
+    def race(send, competing_texts):
+        barrier = Barrier(2)
+
+        def send_after_barrier(text):
+            barrier.wait(timeout=4)
+            return send(text)
+
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            return list(workers.map(send_after_barrier, competing_texts))
+
+    clarification = race(
+        lambda text: _retry(client, headers, item_id, original_request_id, text),
+        ("Clarified A.", "Clarified B."),
+    )
+    assert sorted(response.status_code for response in clarification) == [202, 409]
+    assessed = client.get(f"{base}/submission").json()
+    action = {"request_id": assessed["request"]["id"], "version": 0}
+    revisions = race(
+        lambda text: client.post(f"{base}/revise", headers=headers, json={**action, "text": text}),
+        ("Revised A.", "Revised B."),
+    )
+    assert sorted(response.status_code for response in revisions) == [202, 409]
+    result = client.get(f"{base}/submission").json()
+    assert [v["kind"] for v in result["versions"]] == ["initial", "clarification", "revision"]
+
+    # Replaying an already accepted clarification after a revision returns the saved result.
+    assert _retry(client, headers, item_id, original_request_id, assessed["assessed_text"]).json() == result
+    assert _retry(client, headers, item_id, original_request_id).status_code == 409
+    assert client.get("/api/usage").json() == {"attempts_24h": 3}
+    with db.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM practice_credits").fetchone() == (1,)
+        assert connection.execute("SELECT grading_request_id FROM review_evidence").fetchall() == [
+            (assessed["request"]["id"],),
+        ]
+
+
+def test_revision_clarification_keeps_assisted_role_and_original_unchanged(learner):
+    client, headers, db, _ = learner
+    _configure_model(db)
+    calls = []
+
+    def assess(outbound):
+        calls.append(outbound)
+        if len(calls) == 2:
+            return _needs_clarification("Please name the comparison.")
+        return response_stream(_valid_terminal(outbound))
+
+    client.app.state.grading.provider = provider(assess)
+    item_id = _today(client, headers)["selections"][0]["item"]["id"]
+    base = f"/api/practice/items/{item_id}"
+    _submit(client, headers, item_id, "Original.")
+    original = client.get(f"{base}/submission").json()
+    action = {"request_id": original["request"]["id"], "text": "My comparison.", "version": 0}
+    assert client.post(f"{base}/revise", headers=headers, json=action).status_code == 202
+    current = client.get(f"{base}/submission").json()["revision"]
+    assert current["clarification_draft"] == {"text": action["text"], "version": 0}
+    assert _today(client, headers)["selections"][0]["item"]["grading_status"] == "needs_clarification"
+    revision_request_id = current["request"]["id"]
+    clarified = "Compare on unseen data."
+    update = {"request_id": revision_request_id, "text": clarified, "version": 0}
+    assert client.put(f"{base}/clarification-draft", headers=headers, json=update).status_code == 200
+    assert _retry(client, headers, item_id, revision_request_id, clarified).status_code == 409
+    update["version"] = 1
+    response = client.post(f"{base}/retry", headers=headers, json={**update, "idempotency_key": "clarify-revision"})
+    assert response.status_code == 202
+    result = client.get(f"{base}/submission").json()
+    assert result["revision"]["assessed_text"] == clarified
+    assert result["revision"]["request"]["state"] == "assessed"
+    assert result["request"] == original["request"]
+    assert [(v["role"], v["kind"], v["supported"]) for v in result["versions"]] == [
+        ("original", "initial", False),
+        ("revision", "revision", True),
+        ("revision", "clarification", True),
+    ]
+    assert client.post(f"{base}/revise", headers=headers, json=action).status_code == 202
+    assert client.post(f"{base}/revise", headers=headers, json={**action, "text": clarified}).status_code == 409
+
+
+def test_backfill_legacy_clarification_chain_and_transport_retries(learner, tmp_path):
+    client, headers, db, instants = learner
+    calls = []
+
+    def assess(outbound):
+        calls.append(outbound)
+        if len(calls) < 3:
+            return _needs_clarification("Please be specific.")
+        return response_stream(_valid_terminal(outbound))
+
+    client.app.state.grading.provider = provider(assess)
+    item_id = _today(client, headers)["selections"][0]["item"]["id"]
+    url = f"/api/practice/items/{item_id}/submission"
+    original_answer = "Keep test data separate."
+    initial = _submit(client, headers, item_id, original_answer).json()["submission"]["request"]
+    _configure_model(db)
+    _retry(client, headers, item_id, initial["id"])
+    original_retry = client.get(url).json()["request"]
+    _retry(client, headers, item_id, original_retry["id"], original_answer)
+    clarified = client.get(url).json()["request"]
+    _retry(client, headers, item_id, clarified["id"], "Keep an untouched test set until final evaluation.")
+    result = client.get(url).json()
+
+    legacy = Database(tmp_path / "legacy-restore")
+    with db.connect() as source, legacy.connect() as destination:
+        source.backup(destination)
+        # Remove the additive DML-8 schema while preserving the legacy records.
+        destination.execute("DROP VIEW practice_evaluated_requests")
+        for table in ("practice_revision_drafts", "practice_revisions", "practice_grading_versions",
+                      "practice_submission_versions"):
+            destination.execute(f"DROP TABLE {table}")
+    after_restart = Practice(legacy, answer_limit=8000, clock=lambda: instants[0])
+    assert after_restart.submission(item_id) == result
+    assert [v["id"] for v in result["versions"]] == [initial["id"], clarified["id"], result["request"]["id"]]
+    assert result["versions"][0]["request"]["id"] == original_retry["id"]
+    with legacy.connect() as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_today_reopens_both_older_completed_comparisons_for_the_same_question(learner):
+    client, headers, db, instants = learner
+    _configure_model(db)
+    client.app.state.grading.provider = provider(lambda request: response_stream(_valid_terminal(request)))
+    client.app.state.grading.clock = lambda: instants[0].timestamp()
+    first = _today(client, headers)["selections"][0]["item"]
+
+    def complete_revision(item):
+        base = f"/api/practice/items/{item['id']}"
+        assert _submit(client, headers, item["id"], "Original answer.").status_code == 202
+        current = client.get(f"{base}/submission").json()
+        action = {"request_id": current["request"]["id"], "text": "Revised answer.", "version": 0}
+        assert client.post(f"{base}/revise", headers=headers, json=action).status_code == 202
+
+    complete_revision(first)
+    instants[0] = datetime(2026, 3, 29, 12, tzinfo=UTC)
+    second = _today(client, headers)["selections"][0]["item"]
+    assert second["id"] != first["id"]
+    assert second["question"]["id"] == first["question"]["id"]
+    complete_revision(second)
+
+    instants[0] = datetime(2026, 4, 20, 12, tzinfo=UTC)
+    submitted = [item["id"] for item in _today(client, headers)["submitted"]]
+    assert submitted == [second["id"], first["id"]]
+    for item in (first, second):
+        comparison = client.get(f"/api/practice/items/{item['id']}/submission").json()
+        assert comparison["revision"]["assessed_text"] == "Revised answer."
+        assert comparison["revision"]["request"]["state"] == "assessed"
+
+
+def test_supported_original_is_frozen_through_clarification_and_revision(learner):
+    client, headers, db, _ = learner
+    _configure_model(db)
+    calls = []
+
+    def assess(outbound):
+        calls.append(outbound)
+        if len(calls) == 1:
+            return _needs_clarification("Name the validation data.")
+        return response_stream(_valid_terminal(outbound))
+
+    client.app.state.grading.provider = provider(assess)
+    item_id = _today(client, headers)["selections"][0]["item"]["id"]
+    base = f"/api/practice/items/{item_id}"
+    assert client.post(f"{base}/help/hint", headers=headers).status_code == 200
+    response = _submit(client, headers, item_id, "I used the reference example.")
+    assert response.status_code == 202
+    original = client.get(f"{base}/submission").json()
+    assert original["supported"] is True
+    assert _retry(client, headers, item_id, original["request"]["id"], "I used a held-out sample.").status_code == 202
+    assessed = client.get(f"{base}/submission").json()
+    revision = {"request_id": assessed["request"]["id"], "text": "I used a held-out dataset.", "version": 0}
+    assert client.post(f"{base}/revise", headers=headers, json=revision).status_code == 202
+    result = client.get(f"{base}/submission").json()
+    assert [(v["role"], v["supported"], v["request"]["supported"]) for v in result["versions"]] == [
+        ("original", True, True), ("original", True, True), ("revision", True, True),
+    ]
+    with db.connect() as connection:
+        assert connection.execute("SELECT grading_request_id, supported FROM review_evidence").fetchall() == [
+            (assessed["request"]["id"], 1),
+        ]
+
+
+def test_today_reopens_each_older_original_with_an_unused_revision(learner):
+    client, headers, db, instants = learner
+    _configure_model(db)
+    calls = []
+
+    def assess(outbound):
+        calls.append(outbound)
+        if len(calls) == 3:
+            return _needs_clarification("Name the evaluation criterion.")
+        return response_stream(_valid_terminal(outbound))
+
+    client.app.state.grading.provider = provider(assess)
+    client.app.state.grading.clock = lambda: instants[0].timestamp()
+    first = _today(client, headers)["selections"][0]["item"]
+    assert _submit(client, headers, first["id"], "The first answer.").status_code == 202
+
+    instants[0] = datetime(2026, 3, 29, 12, tzinfo=UTC)
+    second, pending = [entry["item"] for entry in _today(client, headers)["selections"]]
+    assert second["question"]["id"] == first["question"]["id"]
+    assert second["id"] != first["id"]
+    assert _submit(client, headers, second["id"], "The later answer.").status_code == 202
+    assert _submit(client, headers, pending["id"], "An answer needing clarification.").status_code == 202
+
+    instants[0] = datetime(2026, 4, 20, 12, tzinfo=UTC)
+    submitted = {item["id"]: item["grading_status"] for item in _today(client, headers)["submitted"]}
+    assert submitted == {
+        first["id"]: "assessed", second["id"]: "assessed", pending["id"]: "needs_clarification",
+    }
+    for item in (first, second):
+        base = f"/api/practice/items/{item['id']}"
+        saved = client.get(f"{base}/submission").json()
+        edit = {"request_id": saved["request"]["id"], "text": "My revised answer.", "version": 0}
+        assert saved["revision_draft"] is not None
+        assert client.post(f"{base}/revise", headers=headers, json=edit).status_code == 202
+    with db.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM practice_credits").fetchone() == (3,)
+        assert connection.execute("SELECT COUNT(*) FROM review_evidence").fetchone() == (2,)
+
+
 def test_offline_help_and_gap_api_requires_acknowledgement_and_saves_one_credit(learner):
     """Exercise protected support controls across a local-day rollover."""
     client, headers, db, instants = learner

@@ -94,8 +94,8 @@ class DraftEdit(BaseModel):
     version: int = Field(ge=0, le=2**63 - 1)
 
 
-class ClarificationDraftEdit(DraftEdit):
-    """Save a draft for the displayed clarification request."""
+class FollowOnEdit(DraftEdit):
+    """Edit or submit exact text against the displayed grading request."""
 
     request_id: UUID = Field(strict=False)
 
@@ -472,11 +472,29 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         return submission
 
     @app.put("/api/practice/items/{item_id}/clarification-draft")
-    def save_clarification_draft(item_id: UUID, edit: ClarificationDraftEdit) -> Draft:
+    def save_clarification_draft(item_id: UUID, edit: FollowOnEdit) -> Draft:
         """Save exact clarification text locally without requesting grading."""
         return practice.save_clarification_draft(
             str(item_id), str(edit.request_id), edit.text, expected_version=edit.version,
         )
+
+    @app.put("/api/practice/items/{item_id}/revision-draft")
+    def save_revision_draft(item_id: UUID, edit: FollowOnEdit) -> Draft:
+        """Save the next revision draft without queuing grading."""
+        return practice.save_revision_draft(
+            str(item_id), str(edit.request_id), edit.text, expected_version=edit.version,
+        )
+
+    @app.post("/api/practice/items/{item_id}/revise", status_code=202)
+    def revise_practice(item_id: UUID, action: FollowOnEdit, request: Request, background: BackgroundTasks) -> dict:
+        """Commit the sole assisted revision and enqueue grading after the commit."""
+        submission, dispatch_id = practice.revise(
+            str(item_id), str(action.request_id), action.text,
+            expected_version=action.version, resolve_settings=submission_settings,
+        )
+        if dispatch_id:
+            background.add_task(request.app.state.grading.run_pending, dispatch_id)
+        return submission
 
     @app.post("/api/practice/today")
     def open_today() -> PracticeToday:
