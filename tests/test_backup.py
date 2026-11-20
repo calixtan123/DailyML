@@ -65,6 +65,23 @@ def test_validate_backup_rejects_a_missing_registered_learning_table(tmp_path):
         Database.validate_backup(backup)
 
 
+def test_validate_backup_rejects_missing_required_practice_column_and_invalid_timezone(tmp_path):
+    """A restore candidate must remain usable by Practice and Settings after startup."""
+    source = Database(tmp_path / "source")
+    Practice(source, answer_limit=8_000)
+    backup = source.create_backup()
+    with sqlite3.connect(backup) as connection:
+        connection.execute("ALTER TABLE practice_items DROP COLUMN last_practised_date")
+    with pytest.raises(BackupError, match="valid Daily ML backup"):
+        Database.validate_backup(backup)
+
+    valid = source.create_backup()
+    with sqlite3.connect(valid) as connection:
+        connection.execute("UPDATE user_preferences SET settings_json = ?", ('{"timezone": "bogus timezone"}',))
+    with pytest.raises(BackupError, match="valid Daily ML backup"):
+        Database.validate_backup(valid)
+
+
 def test_restore_keeps_pre_restore_copy_and_replaces_database_atomically(tmp_path):
     """Stopped-app restore preserves rollback material before replacing live data."""
     data_dir = tmp_path / "Live Data"

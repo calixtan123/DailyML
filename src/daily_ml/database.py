@@ -11,9 +11,21 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import mkstemp
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 SQLITE_WAIT_SECONDS = 3
 BACKUP_SCHEMA_VERSION = 1
+
+# Columns read by the current Practice service. A manifest records which
+# durable tables exist; these checks prevent an older/core-only manifest from
+# admitting a truncated database that still names a current practice table.
+_REQUIRED_TABLE_COLUMNS = {
+    "practice_items": {
+        "id", "local_date", "timezone", "created_at", "question_id", "question_version",
+        "section_id", "section_title", "snapshot_json", "draft_text", "draft_version",
+        "last_practised_date",
+    },
+}
 
 
 class PreferenceConflict(RuntimeError):
@@ -106,7 +118,18 @@ class Database:
             }
             if not required <= recorded_tables or not recorded_tables <= tables:
                 raise ValueError
-        except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+            for table, required_columns in _REQUIRED_TABLE_COLUMNS.items():
+                if table in tables:
+                    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+                    if not required_columns <= columns:
+                        raise ValueError
+            preferences = json.loads(row[1])
+            timezone = preferences.get("timezone")
+            if timezone is not None:
+                if not isinstance(timezone, str) or not 0 < len(timezone) <= 128 or "\0" in timezone:
+                    raise ValueError
+                ZoneInfo(timezone)
+        except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError, ZoneInfoNotFoundError):
             raise BackupError("The selected file is not a valid Daily ML backup.") from None
 
     @staticmethod
@@ -138,16 +161,19 @@ class Database:
 
     def _backup_to(self, destination: Path) -> Path:
         """Make, validate, and durably publish an online SQLite backup."""
-        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(destination.parent, 0o700)
-        descriptor, temporary_name = mkstemp(
-            prefix=f".{destination.name}.", suffix=".preparing", dir=destination.parent,
-        )
-        os.close(descriptor)
-        temporary = Path(temporary_name)
+        temporary: Path | None = None
         try:
+            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.chmod(destination.parent, 0o700)
+            self._fsync(destination.parent)
+            descriptor, temporary_name = mkstemp(
+                prefix=f".{destination.name}.", suffix=".preparing", dir=destination.parent,
+            )
+            os.close(descriptor)
+            temporary = Path(temporary_name)
             with self.connect() as source, closing(sqlite3.connect(temporary)) as target:
                 self._online_backup(source, target)
+                target.execute("PRAGMA journal_mode = DELETE")
                 self._validate_connection(target)
             os.chmod(temporary, 0o600)
             self._fsync(temporary)
@@ -155,12 +181,16 @@ class Database:
             self._fsync(destination)
             return destination
         except (OSError, sqlite3.Error, BackupError) as error:
-            temporary.unlink(missing_ok=True)
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
             if isinstance(error, BackupError):
                 raise
             raise BackupError("Could not create a verified backup. Check disk space and permissions.") from None
 
-    def create_backup(self) -> Path:
+    def create_backup(self, *, prefix: str = "daily-ml-backup") -> Path:
         """Create a verified, private online backup of all learning data.
 
         Returns
@@ -174,7 +204,7 @@ class Database:
             If SQLite cannot create or verify the backup.
         """
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        return self._backup_to(self.backup_dir / f"daily-ml-backup-{timestamp}-{uuid4().hex}.sqlite3")
+        return self._backup_to(self.backup_dir / f"{prefix}-{timestamp}-{uuid4().hex}.sqlite3")
 
     @staticmethod
     def record_backup_tables(connection: sqlite3.Connection) -> None:
@@ -240,6 +270,7 @@ class Database:
         try:
             with closing(sqlite3.connect(backup.resolve().as_uri() + "?mode=ro", uri=True)) as source, closing(sqlite3.connect(staging)) as target:
                 self._online_backup(source, target)
+                target.execute("PRAGMA journal_mode = DELETE")
                 self._validate_connection(target)
             os.chmod(staging, 0o600)
             self._fsync(staging)
@@ -253,7 +284,10 @@ class Database:
             self.validate_backup(self.path)
             return pre_restore
         except (OSError, sqlite3.Error, BackupError) as error:
-            staging.unlink(missing_ok=True)
+            try:
+                staging.unlink(missing_ok=True)
+            except OSError:
+                pass
             if replaced and pre_restore is not None:
                 if self._restore_pre_replace_state(pre_restore):
                     raise BackupError(
@@ -286,10 +320,7 @@ class Database:
         """Try to atomically return the verified pre-restore data to the live path."""
         rollback = self.path.with_name(f".{self.path.name}.{uuid4().hex}.restore-rollback")
         try:
-            with closing(sqlite3.connect(pre_restore.resolve().as_uri() + "?mode=ro", uri=True)) as source, closing(sqlite3.connect(rollback)) as target:
-                self._online_backup(source, target)
-                self._validate_connection(target)
-            os.chmod(rollback, 0o600)
+            os.link(pre_restore, rollback)
             self._fsync(rollback)
             os.replace(rollback, self.path)
             self._fsync(self.path)
@@ -298,7 +329,10 @@ class Database:
         except (OSError, sqlite3.Error, BackupError):
             return False
         finally:
-            rollback.unlink(missing_ok=True)
+            try:
+                rollback.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     @contextmanager
     def connect(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:

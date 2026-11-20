@@ -276,7 +276,7 @@ def test_existing_credit_schema_migrates_and_preserves_answer_credit(database):
         assert any(row[2] == "practice_items" for row in foreign_keys)
         assert connection.execute("SELECT COUNT(*) FROM practice_credits").fetchone() == (1,)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-    [backup] = database.path.parent.glob("daily-ml-before-gap-upgrade-*.sqlite3")
+    [backup] = (database.path.parent / "backups").glob("daily-ml-before-gap-upgrade-*.sqlite3")
     with closing(sqlite3.connect(backup)) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
         assert any(row[2] == "practice_submissions"

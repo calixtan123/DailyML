@@ -338,7 +338,7 @@ class Practice:
         foreign_keys = connection.execute("PRAGMA foreign_key_list(practice_credits)").fetchall()
         if not any(row[2] == "practice_submissions" for row in foreign_keys):
             return
-        self.database.create_backup()
+        self.database.create_backup(prefix="daily-ml-before-gap-upgrade")
         connection.execute("DROP INDEX IF EXISTS practice_credits_by_date")
         connection.execute("ALTER TABLE practice_credits RENAME TO practice_credits_legacy")
         connection.execute(_CREDITS_SCHEMA)

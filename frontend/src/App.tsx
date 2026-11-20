@@ -52,6 +52,7 @@ function SettingsPage({ retainedAction, setRetainedAction }: {
   return (
     <>
       <h1>Settings</h1>
+      <BackupSettings requestFile={requestFile} />
       <ConnectionSettings request={request} onGradingAccount={updateGradingAccount} />
       <GradingSettings
         key={gradingAccount ?? null}
@@ -61,7 +62,6 @@ function SettingsPage({ retainedAction, setRetainedAction }: {
         onUncertainActionChange={updateUncertainAction}
       />
       <TimezoneSettings request={request} />
-      <BackupSettings requestFile={requestFile} />
     </>
   )
 }
