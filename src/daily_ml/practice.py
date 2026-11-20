@@ -1645,13 +1645,13 @@ class Practice:
                    LEFT JOIN practice_revisions AS revision ON revision.item_id = item.id
                    LEFT JOIN grading_requests AS request
                      ON request.id = COALESCE(revision.current_request_id, submission.current_request_id)
-                   WHERE (gap.item_id IS NOT NULL OR submission.item_id IS NOT NULL)
+                   WHERE (gap.completed_date >= ? OR submission.item_id IS NOT NULL)
                      AND NOT EXISTS (
                         SELECT 1 FROM practice_selections WHERE local_date = ? AND item_id = item.id
                      )
                    ORDER BY CASE WHEN revision.item_id IS NOT NULL THEN request.created_at
                                  ELSE COALESCE(gap.completed_at, submission.completed_at) END DESC, item.id""",
-                (local_date,),
+                (week_start.isoformat(), local_date),
             )
         ]
         recommended = sum(selection.kind in ("review", "variety") for selection in selections)

@@ -211,6 +211,27 @@ def test_gap_uses_the_date_explanation_is_acknowledged(database):
     assert recency == ("2026-11-17",)
 
 
+def test_today_hides_prior_week_gap_but_keeps_unresolved_grading(database):
+    saturday = datetime(2026, 11, 21, 23, 59, tzinfo=timezone.utc)
+    sunday = datetime(2026, 11, 22, 0, 1, tzinfo=timezone.utc)
+    monday = datetime(2026, 11, 23, 0, 1, tzinfo=timezone.utc)
+    practice = service(database, now=saturday)
+    gap, pending = [selection.item for selection in practice.today(LONDON).selections[:2]]
+    practice.begin_gap(gap.id)
+    practice.acknowledge_gap(gap.id, "sunday-gap", resolve_timezone=london_timezone)
+    practice.submit(
+        pending.id, "An answer awaiting grading.", expected_version=0,
+        resolve_settings=lambda _connection: (LONDON, "test-model"),
+    )
+
+    sunday_today = service(database, now=sunday).today(LONDON)
+    monday_today = service(database, now=monday).today(LONDON)
+
+    assert {item.id for item in sunday_today.submitted} == {gap.id, pending.id}
+    assert {item.id for item in monday_today.submitted} == {pending.id}
+    assert practice.submission(gap.id)["request"]["state"] == "self_reported_gap"
+
+
 def test_gap_retry_after_day_rollover_reuses_completion_and_prepares_today(database):
     practice = service(database)
     item = practice.today(LONDON).selections[0].item
