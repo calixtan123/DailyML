@@ -34,6 +34,7 @@ def test_backup_round_trips_populated_current_practice_records(tmp_path):
     """A supported-schema backup reopens current practice records after restore."""
     source = Database(tmp_path / "source")
     import_bank(source, validate_bank())
+    source.save_preferences({"timezone": "Asia/Tokyo"}, expected_version=0)
     practice = Practice(source, answer_limit=8_000)
     item = practice.today("Europe/London").selections[0].item
     practice.submit(
@@ -49,8 +50,10 @@ def test_backup_round_trips_populated_current_practice_records(tmp_path):
     restored.restore_backup(source.create_backup())
 
     reopened = Practice(restored, answer_limit=8_000)
-    assert reopened.submission(item.id)["request"]["state"] == "awaiting_access"
-    assert restored.get_preferences().values == {}
+    submission = reopened.submission(item.id)
+    assert submission["request"]["state"] == "awaiting_access"
+    assert submission["text"] == "A saved answer included in the backup."
+    assert restored.get_preferences().values == {"timezone": "Asia/Tokyo"}
     with restored.connect() as connection:
         assert connection.execute(
             "SELECT question_id, question_version, snapshot_json FROM practice_items WHERE id = ?", (item.id,)
@@ -213,6 +216,82 @@ def test_validate_backup_rejects_practice_snapshot_for_a_different_question(tmp_
         connection.execute("UPDATE practice_items SET snapshot_json = ? WHERE id = ?", (second[1], first[0]))
 
     with pytest.raises(BackupError, match="valid Daily ML backup"):
+        Database.validate_backup(invalid)
+
+
+def test_restore_rejects_newer_version_of_a_packaged_question(tmp_path):
+    """Restore must reject a saved version the next release import would refuse."""
+    source = Database(tmp_path / "source")
+    bank = validate_bank()
+    import_bank(source, bank)
+    invalid = source.create_backup()
+    newer = bank.questions[0].model_copy(update={"version": bank.questions[0].version + 1})
+    with sqlite3.connect(invalid) as connection:
+        connection.execute(
+            "INSERT INTO bank_question_versions VALUES (?, ?, ?, ?, ?, ?)",
+            (newer.id, newer.version, newer.section_id, newer.concept_id, newer.retired, newer.model_dump_json()),
+        )
+
+    live = Database(tmp_path / "live")
+    live.save_preferences({"timezone": "Asia/Tokyo"}, expected_version=0)
+    with pytest.raises(BackupError):
+        live.restore_backup(invalid)
+    assert live.get_preferences().values == {"timezone": "Asia/Tokyo"}
+
+
+def test_restore_accepts_saved_bank_missing_a_current_question(tmp_path):
+    """The next startup import can supply a question absent from the saved bank."""
+    source = Database(tmp_path / "source")
+    bank = validate_bank()
+    import_bank(source, bank)
+    with source.connect() as connection:
+        connection.execute("DELETE FROM bank_question_versions WHERE question_id = ?", (bank.questions[0].id,))
+
+    restored = Database(tmp_path / "restored")
+    restored.restore_backup(source.create_backup())
+    assert import_bank(restored, bank).inserted == 1
+
+
+@pytest.mark.parametrize("changed", [False, True], ids=["reformatted", "changed-title"])
+def test_validate_backup_compares_immutable_snapshot_content(tmp_path, changed):
+    """Equivalent JSON formatting survives while a same-version edit fails."""
+    source = Database(tmp_path / "source")
+    import_bank(source, validate_bank())
+    Practice(source, answer_limit=8_000).today("Europe/London")
+    candidate = source.create_backup()
+    with sqlite3.connect(candidate) as connection:
+        connection.execute("DROP TRIGGER practice_snapshot_immutable")
+        item_id, raw = connection.execute("SELECT id, snapshot_json FROM practice_items LIMIT 1").fetchone()
+        snapshot = json.loads(raw)
+        if changed:
+            snapshot["title"] = "An unrelated title"
+        connection.execute("UPDATE practice_items SET snapshot_json = ? WHERE id = ?", (
+            json.dumps(snapshot, indent=2, sort_keys=True), item_id,
+        ))
+
+    if changed:
+        with pytest.raises(BackupError):
+            Database.validate_backup(candidate)
+    else:
+        Database.validate_backup(candidate)
+
+
+@pytest.mark.parametrize("table", [
+    "concept_review_state", "review_evidence_selection", "practice_clarification_drafts",
+    "practice_revision_drafts", "model_rate_limit_retries", "model_attempts",
+])
+def test_validate_backup_rejects_missing_application_write_key(tmp_path, table):
+    """Removing one real key leaves the table columns intact but breaks normal writes."""
+    source = Database(tmp_path / "source")
+    import_bank(source, validate_bank())
+    Practice(source, answer_limit=8_000)
+    invalid = source.create_backup()
+    with sqlite3.connect(invalid) as connection:
+        schema = connection.execute("SELECT sql FROM sqlite_schema WHERE name = ?", (table,)).fetchone()[0]
+        connection.execute(f"DROP TABLE {table}")
+        connection.execute(schema.replace("PRIMARY KEY", ""))
+
+    with pytest.raises(BackupError):
         Database.validate_backup(invalid)
 
 

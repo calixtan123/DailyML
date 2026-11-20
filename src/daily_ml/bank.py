@@ -2,6 +2,7 @@
 
 import json
 import re
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation, localcontext
@@ -378,26 +379,28 @@ def validate_saved_question_versions(connection: Connection, packaged_bank: Ques
     ------
     BankError
         If a stored record is malformed, disagrees with its durable identity
-        columns, or differs from a packaged version with the same identity.
+        columns, or prevents the packaged bank from being imported at startup.
     """
     packaged = packaged_bank if packaged_bank is not None else validate_bank()
-    packaged_records = {
-        (question.id, question.version): question.model_dump_json()
-        for question in packaged.questions
-    }
-    rows = connection.execute(
-        """SELECT question_id, version, section_id, concept_id, retired, record_json
-           FROM bank_question_versions"""
-    )
-    for question_id, version, section_id, concept_id, retired, record_json in rows:
-        record = parse_question_snapshot(record_json)
-        if (record.id, record.version, record.section_id, record.concept_id, int(record.retired)) != (
-            question_id, version, section_id, concept_id, retired,
-        ):
-            raise BankError("saved question version identity does not match its durable row")
-        packaged_record = packaged_records.get((question_id, version))
-        if packaged_record is not None and record_json != packaged_record:
-            raise BankError(f"{question_id}: version {version} is immutable; increase version")
+    # Run the same release import against an isolated bank. Only bank rows are
+    # needed, and importing missing bundled versions must never edit a backup.
+    with closing(Connection(":memory:")) as preview:
+        for statement in _SCHEMA:
+            preview.execute(statement)
+        preview.executemany(
+            "INSERT INTO bank_sections VALUES (?, ?, ?, ?)",
+            connection.execute("SELECT id, domain_id, title, position FROM bank_sections"),
+        )
+        rows = connection.execute(
+            """SELECT question_id, version, section_id, concept_id, retired, record_json
+               FROM bank_question_versions"""
+        )
+        for row in rows:
+            record = parse_question_snapshot(row[5])
+            if (record.id, record.version, record.section_id, record.concept_id, int(record.retired)) != row[:5]:
+                raise BankError("saved question version identity does not match its durable row")
+            preview.execute("INSERT INTO bank_question_versions VALUES (?, ?, ?, ?, ?, ?)", row)
+        _apply_bank(preview, packaged)
 
 
 def _check_membership(bank: QuestionBank) -> None:
@@ -519,57 +522,62 @@ def import_bank(database: Database, bank: QuestionBank) -> ImportSummary:
     except ValueError as error:
         raise BankError(str(error)) from None
 
-    inserted = 0
     with database.connect(immediate=True) as connection:
         for statement in _SCHEMA:
             connection.execute(statement)
         database.record_backup_tables(connection)
-        sections = (
-            (domain.id, section) for domain in checked.curriculum.domains for section in domain.sections
+        return ImportSummary(_apply_bank(connection, checked))
+
+
+def _apply_bank(connection: Connection, bank: QuestionBank) -> int:
+    """Apply validated release content and check the resulting active versions."""
+    inserted = 0
+    sections = (
+        (domain.id, section) for domain in bank.curriculum.domains for section in domain.sections
+    )
+    for position, (domain_id, section) in enumerate(sections):
+        existing = connection.execute(
+            "SELECT domain_id FROM bank_sections WHERE id = ?", (section.id,)
+        ).fetchone()
+        if existing and existing[0] != domain_id:
+            raise BankError(f"{section.id}: cannot change the domain of a saved section")
+        connection.execute(
+            """INSERT INTO bank_sections (id, domain_id, title, position) VALUES (?, ?, ?, ?)
+               ON CONFLICT (id) DO UPDATE SET title = excluded.title, position = excluded.position
+               WHERE title != excluded.title OR position != excluded.position""",
+            (section.id, domain_id, section.title, position),
         )
-        for position, (domain_id, section) in enumerate(sections):
-            existing = connection.execute(
-                "SELECT domain_id FROM bank_sections WHERE id = ?", (section.id,)
-            ).fetchone()
-            if existing and existing[0] != domain_id:
-                raise BankError(f"{section.id}: cannot change the domain of a saved section")
-            connection.execute(
-                """INSERT INTO bank_sections (id, domain_id, title, position) VALUES (?, ?, ?, ?)
-                   ON CONFLICT (id) DO UPDATE SET title = excluded.title, position = excluded.position
-                   WHERE title != excluded.title OR position != excluded.position""",
-                (section.id, domain_id, section.title, position),
-            )
-        for question in checked.questions:
-            snapshot = question.model_dump_json()
-            saved = connection.execute(
-                """SELECT record_json FROM bank_question_versions
-                   WHERE question_id = ? AND version = ?""",
-                (question.id, question.version),
-            ).fetchone()
-            if saved is not None:
-                if saved[0] != snapshot:
-                    raise BankError(f"{question.id}: version {question.version} is immutable; increase version")
-                continue
-            prior = connection.execute(
-                """SELECT version, section_id, concept_id FROM bank_question_versions
-                   WHERE question_id = ? ORDER BY version DESC LIMIT 1""",
-                (question.id,),
-            ).fetchone()
-            if prior is not None:
-                if question.version <= prior[0]:
-                    raise BankError(f"{question.id}: new version {question.version} must exceed version {prior[0]}")
-                if (question.section_id, question.concept_id) != prior[1:]:
-                    raise BankError(f"{question.id}: cannot change the section or concept of a saved question")
-            connection.execute(
-                """INSERT INTO bank_question_versions
-                   (question_id, version, section_id, concept_id, retired, record_json)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (question.id, question.version, question.section_id, question.concept_id, question.retired, snapshot),
-            )
-            inserted += 1
-        if checked.release:
-            _check_active_release(connection, checked)
-    return ImportSummary(inserted)
+    for question in bank.questions:
+        snapshot = question.model_dump_json()
+        saved = connection.execute(
+            """SELECT record_json FROM bank_question_versions
+               WHERE question_id = ? AND version = ?""",
+            (question.id, question.version),
+        ).fetchone()
+        if saved is not None:
+            if saved[0] != snapshot:
+                raise BankError(f"{question.id}: version {question.version} is immutable; increase version")
+            continue
+        prior = connection.execute(
+            """SELECT version, section_id, concept_id FROM bank_question_versions
+               WHERE question_id = ? ORDER BY version DESC LIMIT 1""",
+            (question.id,),
+        ).fetchone()
+        if prior is not None:
+            if question.version <= prior[0]:
+                raise BankError(f"{question.id}: new version {question.version} must exceed version {prior[0]}")
+            if (question.section_id, question.concept_id) != prior[1:]:
+                raise BankError(f"{question.id}: cannot change the section or concept of a saved question")
+        connection.execute(
+            """INSERT INTO bank_question_versions
+               (question_id, version, section_id, concept_id, retired, record_json)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (question.id, question.version, question.section_id, question.concept_id, question.retired, snapshot),
+        )
+        inserted += 1
+    if bank.release:
+        _check_active_release(connection, bank)
+    return inserted
 
 
 def list_sections(database: Database) -> list[SectionSummary]:

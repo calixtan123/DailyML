@@ -78,6 +78,12 @@ _EDITABLE_PREFERENCE_KEYS = {"timezone", "model_id"}
 _REQUIRED_UNIQUE_KEYS = {
     "bank_sections": (frozenset({"id"}),),
     "bank_question_versions": (frozenset({"question_id", "version"}),),
+    "concept_review_state": (frozenset({"concept_id"}),),
+    "review_evidence_selection": (frozenset({"original_item_id"}),),
+    "model_attempts": (frozenset({"request_id"}),),
+    "model_rate_limit_retries": (frozenset({"request_id"}),),
+    "practice_clarification_drafts": (frozenset({"request_id"}),),
+    "practice_revision_drafts": (frozenset({"request_id"}),),
     "practice_days": (frozenset({"local_date"}),),
     "practice_items": (frozenset({"id"}), frozenset({"id", "question_id"})),
     "practice_selections": (
@@ -154,6 +160,26 @@ def _foreign_keys(connection: sqlite3.Connection, table: str) -> set[tuple[str, 
     ):
         grouped.setdefault((key_id, referenced_table), set()).add((source, target))
     return {(referenced_table, frozenset(columns)) for (_, referenced_table), columns in grouped.items()}
+
+
+def _validate_practice_snapshots(connection: sqlite3.Connection) -> None:
+    """Compare each saved prompt with the bank version from which it was copied."""
+    from .bank import parse_question_snapshot
+
+    # Practice tables can be initialized before the first bank import.
+    if connection.execute("SELECT 1 FROM practice_items LIMIT 1").fetchone() is None:
+        return
+    rows = connection.execute(
+        """SELECT item.section_id, item.snapshot_json, bank.section_id, bank.record_json
+           FROM practice_items AS item
+           LEFT JOIN bank_question_versions AS bank
+             ON item.question_id = bank.question_id AND item.question_version = bank.version"""
+    )
+    for section_id, snapshot, bank_section_id, record in rows:
+        if section_id != bank_section_id or record is None:
+            raise ValueError("practice item does not reference a matching bank version")
+        if snapshot != record and parse_question_snapshot(snapshot) != parse_question_snapshot(record):
+            raise ValueError("practice snapshot differs from its immutable bank version")
 
 
 def _validate_table_contracts(connection: sqlite3.Connection, recorded_tables: set[str]) -> None:
@@ -296,16 +322,7 @@ class Database:
 
                 validate_saved_question_versions(connection)
             if "practice_items" in recorded_tables:
-                from .bank import parse_question_snapshot
-
-                for question_id, question_version, section_id, snapshot in connection.execute(
-                    "SELECT question_id, question_version, section_id, snapshot_json FROM practice_items"
-                ):
-                    parsed = parse_question_snapshot(snapshot)
-                    if (parsed.id, parsed.version, parsed.section_id) != (
-                        question_id, question_version, section_id,
-                    ):
-                        raise ValueError("practice snapshot identity does not match its durable row")
+                _validate_practice_snapshots(connection)
         except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError, ZoneInfoNotFoundError):
             raise BackupError("The selected file is not a valid Daily ML backup.") from None
 
