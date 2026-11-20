@@ -1,17 +1,24 @@
-import { BookOpen, Settings } from 'lucide-react'
+import { BookOpen, History as HistoryIcon, Settings } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Dispatch, MouseEvent, SetStateAction } from 'react'
 import { request } from './api'
 import { ConnectionSettings, type GradingAccount } from './ConnectionSettings'
 import { GradingSettings, type GradingAction } from './GradingSettings'
+import { History } from './History'
 import { Today, type LeaveToday } from './Today'
 import { TimezoneSettings } from './TimezoneSettings'
 
 type RetainedGradingAction = { account: string; action: GradingAction }
-type Page = 'Today' | 'Settings'
+type Page = 'Today' | 'History' | 'Settings'
 
 function activePage(): Page {
-  return window.location.hash === '#/settings' ? 'Settings' : 'Today'
+  if (window.location.hash === '#/settings') return 'Settings'
+  if (window.location.hash === '#/history') return 'History'
+  return 'Today'
+}
+
+function practiceItemInRoute(): string | undefined {
+  return /^#\/today\/([a-f0-9-]{36})$/i.exec(window.location.hash)?.[1]
 }
 
 function historyIndex(): number | undefined {
@@ -57,9 +64,10 @@ function SettingsPage({ retainedAction, setRetainedAction }: {
   )
 }
 
-/** Render Today and Settings, retaining unacknowledged grading submissions across navigation. */
+/** Render local practice pages, retaining unacknowledged grading submissions across navigation. */
 export function App() {
   const [page, setPage] = useState(activePage)
+  const [practiceItemId, setPracticeItemId] = useState(practiceItemInRoute)
   const [openedToday, setOpenedToday] = useState(() => activePage() === 'Today')
   const [retainedAction, setRetainedAction] = useState<RetainedGradingAction>()
   const content = useRef<HTMLElement>(null)
@@ -67,12 +75,13 @@ export function App() {
   const route = useRef({ page, hash: window.location.hash, index: historyIndex() ?? 0 })
   const navigating = useRef(false)
 
-  const navigate = useCallback(async (requested?: Page) => {
+  const navigate = useCallback(async (requested?: Page, itemId?: string) => {
     if (navigating.current) return
     const previous = route.current
     const next = requested ?? activePage()
+    const target = requested ? `#/${next.toLowerCase()}${itemId ? `/${itemId}` : ''}` : window.location.hash
     let saved = true
-    if (previous.page === 'Today' && next === 'Settings' && leaveToday.current) {
+    if (previous.page === 'Today' && target !== previous.hash && leaveToday.current) {
       navigating.current = true
       try {
         saved = await leaveToday.current()
@@ -84,10 +93,9 @@ export function App() {
     // Prefer the latest history destination if the browser moved during the save.
     const stillAtPreviousEntry = window.location.hash === previous.hash && historyIndex() === previous.index
     if (requested && stillAtPreviousEntry) {
-      const target = `#/${next.toLowerCase()}`
       if (!saved || target === previous.hash) return
       window.history.pushState({ dailyMlRouteIndex: previous.index + 1 }, '', target)
-    } else if (!saved && activePage() === 'Settings') {
+    } else if (!saved) {
       const destination = historyIndex()
       if (destination !== undefined && destination !== previous.index) {
         // Restore the accepted entry without erasing the Back or Forward destination.
@@ -107,6 +115,7 @@ export function App() {
     }
     route.current = { page: current, hash: window.location.hash, index }
     if (current === 'Today') setOpenedToday(true)
+    setPracticeItemId(practiceItemInRoute())
     setPage(current)
   }, [])
 
@@ -144,6 +153,10 @@ export function App() {
               onClick={(event) => navigateLink(event, 'Today')}>
               <BookOpen size={17} aria-hidden="true" /> Today
             </a>
+            <a className="nav-link" href="#/history" aria-current={page === 'History' ? 'page' : undefined}
+              onClick={(event) => navigateLink(event, 'History')}>
+              <HistoryIcon size={17} aria-hidden="true" /> History
+            </a>
             <a className="nav-link" href="#/settings" aria-current={page === 'Settings' ? 'page' : undefined}
               onClick={(event) => navigateLink(event, 'Settings')}>
               <Settings size={17} aria-hidden="true" /> Settings
@@ -155,9 +168,10 @@ export function App() {
           <main id="main-content" tabIndex={-1} ref={content}>
             {openedToday && (
               <div hidden={page !== 'Today'}>
-                <Today request={request} active={page === 'Today'} leaveToday={leaveToday} />
+                <Today request={request} active={page === 'Today'} leaveToday={leaveToday} resumeItemId={practiceItemId} />
               </div>
             )}
+            {page === 'History' && <History request={request} onResume={itemId => void navigate('Today', itemId)} />}
             {page === 'Settings' && (
               <SettingsPage retainedAction={retainedAction} setRetainedAction={setRetainedAction} />
             )}

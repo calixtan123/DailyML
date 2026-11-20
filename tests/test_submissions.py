@@ -946,7 +946,6 @@ def test_today_reopens_each_older_original_with_an_unused_revision(learner):
         assert connection.execute("SELECT COUNT(*) FROM practice_credits").fetchone() == (3,)
         assert connection.execute("SELECT COUNT(*) FROM review_evidence").fetchone() == (2,)
 
-
 def test_offline_help_and_gap_api_requires_acknowledgement_and_saves_one_credit(learner):
     """Exercise protected support controls across a local-day rollover."""
     client, headers, db, instants = learner
@@ -982,6 +981,9 @@ def test_offline_help_and_gap_api_requires_acknowledgement_and_saves_one_credit(
     concept_id = item["question"]["concept_id"]
     assert completion.json()["today"]["reviews"][concept_id]["due_date"] == "2026-03-31"
     assert client.get(f"{path}/submission").json() == saved
+    resumed_item = client.get(path).json()
+    assert resumed_item["submitted"] is True
+    assert resumed_item["grading_status"] == "self_reported_gap"
     assert _submit(client, headers, item["id"], "A competing answer.").status_code == 409
     with db.connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM grading_requests").fetchone() == (0,)

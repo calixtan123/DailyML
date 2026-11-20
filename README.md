@@ -46,6 +46,12 @@ Use **Dispute assessment** on a saved assessed answer to retain its exact evalua
 
 **Request reassessment** sends that same frozen answer, marking guide, references, support classification, and role through the normal grading and usage path. It sends the objection only for that explicit reassessment. Compare the two assessments, then accept either one or leave the dispute open. Accepting a reassessment selects it for the original answer's review replay; an assisted-revision dispute never changes the original answer's review schedule. Reassessment failures and uncertain results remain saved and can be explicitly requested again. SQLite backup and restore retain open disputes, comparison feedback, and selected resolutions.
 
+## History
+
+Open **History** to find saved practice by section or practice date. Select an item to inspect its original question, marking guide, sources, answers and feedback, including any clarification, assisted revision or dispute. History shows when the item was completed or assessed and the concept's current review date when available.
+
+**Resume practice** opens the same saved item and its draft. **Recover saved answer** opens the saved request so you can review the available grading action. History and drafts are available before signing in. Requesting grading or reassessment requires a connected account.
+
 ## Settings and local data
 
 The default directory is `~/Library/Application Support/Daily ML Practice/`. It contains the SQLite database for preferences, imported question versions, saved recommendations, question snapshots and drafts, plus rotating operational logs and a protected `credentials/` directory. A consistent SQLite backup includes the saved practice records. Keep credentials out of SQLite backups. Signing out retains SQLite data and the saved account registration and installation identity.

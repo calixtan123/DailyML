@@ -213,6 +213,21 @@ input { background: var(--input); min-width: 0; width: 180px; }
 .today-bank > summary { min-height: 44px; width: fit-content; padding: 10px 4px; color: var(--accent); cursor: pointer; }
 .today-bank[open] > summary { margin-bottom: 8px; }
 
+.history { max-width: 76ch; overflow-wrap: anywhere; }
+.history form { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+.history form > div { display: grid; gap: 4px; min-width: 0; flex: 1 1 145px; }
+.history form input, .history form select { width: 100%; min-width: 0; }
+.history form [role="alert"] { flex-basis: 100%; }
+.history > section { margin-bottom: 24px; }
+.history > section > ul { list-style: none; padding: 0; margin-bottom: 12px; }
+.history > section > ul > li { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.history > section > ul > li > button { text-align: left; }
+.history > section > ul > li > p { margin-top: 4px; color: var(--muted); }
+.history article { display: grid; gap: 8px; }
+.history article h2 { margin-bottom: 0; }
+.history article summary { min-height: 44px; padding-block: 10px; color: var(--accent); cursor: pointer; }
+.history article > button { justify-self: start; }
+
 @container (max-width: 1020px) {
   .browser-grid { display: block; }
   .browser-question-picker { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; }

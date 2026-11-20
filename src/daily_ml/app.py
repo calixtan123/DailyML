@@ -24,8 +24,9 @@ from .connection import Connection, ConnectionError, ConnectionStatus, SignInSta
 from .database import Database, PreferenceConflict, Preferences
 from .grading import GradingContext
 from .grading_jobs import GradingJobs, RetryConflict
+from .history import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, History, HistoryCursorInvalid, HistoryPage, HistorySection
 from .practice import (
-    Draft, DraftConflict, DraftInvalid, Practice, PracticeAddition, PracticeItemNotFound, PracticeToday,
+    Draft, DraftConflict, DraftInvalid, Practice, PracticeAddition, PracticeItem, PracticeItemNotFound, PracticeToday,
     SubmissionConflict, SupportUnavailable,
 )
 from .provider import Provider, ProviderFailure
@@ -194,6 +195,7 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
     database = Database(settings.data_dir)
     import_bank(database, bank)
     practice = Practice(database, answer_limit=settings.answer_limit, review_intervals=settings.review_intervals)
+    history = History(database)
     host = f"127.0.0.1:{port}"
     origin = f"http://{host}"
     cookie_name = f"daily_ml_session_{port}"
@@ -447,6 +449,37 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         """Use the timezone and model preferences in the locked submission snapshot."""
         preferences = database.read_preferences(connection)
         return str(settings_payload(preferences)["timezone"]), model_preferences(preferences)["selected"]
+
+    @app.exception_handler(HistoryCursorInvalid)
+    async def invalid_history_filter(_request: Request, error: HistoryCursorInvalid):
+        """Return a safe, actionable message for an invalid history query."""
+        return _error(422, str(error))
+
+    @app.get("/api/history")
+    def list_history(
+        section_id: str | None = Query(None, pattern=ID_PATTERN, max_length=64),
+        start_date: str | None = Query(None, max_length=10),
+        end_date: str | None = Query(None, max_length=10),
+        cursor: str | None = Query(None, max_length=512),
+        limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    ) -> HistoryPage:
+        """Read one local history page using the saved section and date filters."""
+        return history.list(section_id=section_id, start_date=start_date, end_date=end_date, cursor=cursor, limit=limit)
+
+    @app.get("/api/history/sections")
+    def history_sections() -> tuple[HistorySection, ...]:
+        """List sections that appear in saved practice history."""
+        return history.sections()
+
+    @app.get("/api/history/{item_id}")
+    def history_detail(item_id: UUID) -> dict:
+        """Inspect the exact saved question and learning evidence for one item."""
+        return history.detail(str(item_id))
+
+    @app.get("/api/practice/items/{item_id}")
+    def saved_practice_item(item_id: UUID) -> PracticeItem:
+        """Open the original editor for a saved item, including a retired question."""
+        return practice.saved_item(str(item_id))
 
     @app.get("/api/practice/items/{item_id}/submission")
     def read_submission(item_id: UUID) -> dict | None:

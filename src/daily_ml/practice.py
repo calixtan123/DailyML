@@ -653,6 +653,26 @@ class Practice:
             submission = self._read_submission(connection, item_id)
         return SubmissionResult(submission, today, dispatch_id)
 
+    def saved_item(self, item_id: str) -> PracticeItem:
+        """Read an exact saved editor item without selecting it for today's practice."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """SELECT item.id, item.local_date, item.section_title, item.snapshot_json,
+                          item.draft_text, item.draft_version,
+                          CASE WHEN gap.item_id IS NOT NULL THEN 'self_reported_gap' ELSE request.state END,
+                          request.error
+                   FROM practice_items AS item
+                   LEFT JOIN practice_submissions AS submission ON submission.item_id = item.id
+                   LEFT JOIN practice_gap_completions AS gap ON gap.item_id = item.id
+                   LEFT JOIN practice_revisions AS revision ON revision.item_id = item.id
+                   LEFT JOIN grading_requests AS request
+                     ON request.id = COALESCE(revision.current_request_id, submission.current_request_id)
+                   WHERE item.id = ?""", (item_id,),
+            ).fetchone()
+        if row is None:
+            raise PracticeItemNotFound
+        return self._item(row)
+
     def submission(self, item_id: str) -> dict | None:
         """Read the saved answer and current feedback without dispatching a request.
 
@@ -772,6 +792,7 @@ class Practice:
             except LookupError as error:
                 raise SubmissionConflict(str(error)) from None
             return self._read_submission(connection, item_id)
+
     def view_help(self, item_id: str, kind: Literal["hint", "explanation"]) -> str:
         """Record help use before returning the selected stored teaching text.
 
@@ -1368,10 +1389,10 @@ class Practice:
             "completed_timezone": completed_timezone,
             "credited": bool(credited),
             "assisted": False,
-            "disputes": [],
             "versions": [],
             "revision": None,
             "revision_draft": None,
+            "disputes": [],
             "assessed_text": "I don't know",
             "clarification_draft": None,
             "request": {
@@ -1577,10 +1598,10 @@ class Practice:
                    FROM practice_selections AS selection
                    JOIN practice_items AS item ON item.id = selection.item_id
                    LEFT JOIN practice_submissions AS submission ON submission.item_id = item.id
+                   LEFT JOIN practice_gap_completions AS gap ON gap.item_id = item.id
                    LEFT JOIN practice_revisions AS revision ON revision.item_id = item.id
                    LEFT JOIN grading_requests AS request
                      ON request.id = COALESCE(revision.current_request_id, submission.current_request_id)
-                   LEFT JOIN practice_gap_completions AS gap ON gap.item_id = item.id
                    WHERE selection.local_date = ?
                    ORDER BY selection.slot""",
                 (local_date,),

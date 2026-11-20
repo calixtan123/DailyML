@@ -159,9 +159,10 @@ function SupportControls({ support, disabled, onHelp, onGap, onAcknowledgeGap }:
 }
 
 /** Manage a local editing buffer and switch questions only after every dirty edit is saved. */
-export function Today({ request, active, leaveToday }: {
+export function Today({ request, active, leaveToday, resumeItemId }: {
   request: LocalRequest
   active: boolean
+  resumeItemId?: string
   leaveToday: RefObject<LeaveToday | null>
 }) {
   const [session, setSession] = useState<Session>()
@@ -176,6 +177,9 @@ export function Today({ request, active, leaveToday }: {
   const [copyStatus, setCopyStatus] = useState('')
   const [browsing, setBrowsing] = useState(false)
   const [initialSubmission, setInitialSubmission] = useState<SavedSubmission>()
+  const [openedResume, setOpenedResume] = useState<string>()
+  const resumePending = !!resumeItemId && openedResume !== resumeItemId
+
   const [support, setSupport] = useState<SupportView>()
   const feedbackLeave = useRef<LeaveEditor | null>(null)
   const lastStatus = useRef<{ itemId: string; status: GradingStatus }>(undefined)
@@ -216,7 +220,10 @@ export function Today({ request, active, leaveToday }: {
     return submitted.some(({ grading_status }) => grading_status === 'queued' || grading_status === 'in_flight')
   })
 
+  const isResumePending = useEffectEvent(() => resumePending)
+
   useEffect(() => {
+    if (!active || !resumeItemId) setOpenedResume(undefined)
     if (!active) return
     const controller = new AbortController()
     let loading = false
@@ -232,6 +239,9 @@ export function Today({ request, active, leaveToday }: {
       const priorStatus = lastStatus.current
       try {
         let today = await request<Session>('/api/practice/today', { method: 'POST', signal: controller.signal })
+        const target = resumeItemId && isResumePending()
+          ? await request<PracticeItem>(`/api/practice/items/${resumeItemId}`, { signal: controller.signal })
+          : undefined
         if (controller.signal.aborted || version !== operationVersion.current) return
         const observed = lastStatus.current
         if (observed && observed !== priorStatus) {
@@ -239,6 +249,11 @@ export function Today({ request, active, leaveToday }: {
         }
         setSession(today)
         setLoadError(false)
+        if (target) {
+          setOpenedResume(target.id)
+          showResumedItem(target)
+          return
+        }
         const first = today.selections[0]?.item ?? today.unfinished[0] ?? today.submitted[0]
         if (first) setEditor(previous => {
           if (!previous) return { item: first, text: first.draft.text }
@@ -266,7 +281,7 @@ export function Today({ request, active, leaveToday }: {
       window.clearInterval(timer)
       window.removeEventListener('focus', checkToday)
     }
-  }, [request, active, loadAttempt, requestTodayRefresh])
+  }, [request, active, loadAttempt, requestTodayRefresh, resumeItemId])
 
   useUnsavedDraftWarning(dirty)
 
@@ -291,6 +306,12 @@ export function Today({ request, active, leaveToday }: {
     setInitialSubmission(undefined)
     setSupport(undefined)
   }
+
+  const showResumedItem = useEffectEvent((item: PracticeItem) => {
+    showItem(item)
+    setNotice('')
+    setBrowsing(false)
+  })
 
   function acknowledge(draft: Draft) {
     if (!editor) return
@@ -529,16 +550,19 @@ export function Today({ request, active, leaveToday }: {
     today: session.local_date, byConcept: session.reviews ?? {},
   }
 
+  const loadFeedback = loadError ? (
+    <div className="panel today-load-error">
+      <p role="alert">Could not load today’s saved practice.</p>
+      <button type="button" onClick={retryToday}>Retry loading</button>
+    </div>
+  ) : (resumePending || !session) && <p className="panel" role="status">Loading saved practice…</p>
+
+  if (resumePending) return <><h1>Today</h1>{loadFeedback}</>
+
   return (
     <>
       <h1>Today</h1>
-      {!session && !loadError && <p className="panel" role="status">Loading saved practice…</p>}
-      {loadError && (
-        <div className="panel today-load-error">
-          <p role="alert">Could not load today’s saved practice.</p>
-          <button type="button" onClick={retryToday}>Retry loading</button>
-        </div>
-      )}
+      {loadFeedback}
       {session && (
         <PracticeCalendar localDate={session.local_date} firstUseDate={session.first_use_date}
           counts={session.completion_counts} goal={session.goal} />
