@@ -517,7 +517,7 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
               <p role="status"><strong>Self-reported gap</strong> — no answer was sent for AI grading.</p>
               <AnswerText label="Original answer" text={submission.text} open />
             </>
-          ) :<section className="practice-attempt" aria-labelledby="original-attempt">
+          ) : <section className="practice-attempt" aria-labelledby="original-attempt">
             <h3 id="original-attempt" ref={originalHeading} tabIndex={-1}>Original attempt</h3>
             <AnswerText label="Original answer" text={submission.text} open={Boolean(revision) || original.feedback?.status !== 'assessed'} />
             {submission.assessed_text !== submission.text && (

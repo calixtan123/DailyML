@@ -836,7 +836,7 @@ describe('Practice session grading summaries', () => {
   })
 })
 
-const assessedOriginal: SavedSubmission['request'] = {
+const assessedOriginal: NonNullable<SavedSubmission['revision']>['request'] = {
   id: 'original-assessment', state: 'assessed', grade: 2, can_send: false, message: null,
   reference: { sources: {} },
   feedback: {
@@ -853,7 +853,7 @@ function revisionApi(outcome: 'outcome_unknown' | 'conflict' | 'needs_clarificat
   let revision: {
     assessed_text: string
     clarification_draft: TestDraft | null
-    request: SavedSubmission['request']
+    request: NonNullable<SavedSubmission['revision']>['request']
     submission_version_id: string
     supported: boolean
   } | null = null
