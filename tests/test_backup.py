@@ -635,3 +635,100 @@ def _config(root: Path, data_dir: Path) -> Path:
     config = root / "installation.toml"
     config.write_text(f'data_dir = "{data_dir}"\n', encoding="utf-8")
     return config
+
+
+@pytest.mark.parametrize(("column", "payload"), [
+    ("context_json", "{}"),
+    ("feedback_json", "{"),
+    ("feedback_json", '{"status":"assessed"}'),
+    ("usage_json", "{"),
+    ("usage_json", '["unexpected"]'),
+])
+def test_unreadable_grading_payload_blocks_export_and_restore(tmp_path, column, payload):
+    """Both publication paths reject unreadable records and preserve the working receiver."""
+    source = Database(tmp_path / "source")
+    import_bank(source, validate_bank())
+    practice = Practice(source, answer_limit=8_000)
+    item = practice.today("UTC").selections[0].item
+    practice.submit(
+        item.id, "Disposable saved answer", expected_version=0,
+        resolve_settings=lambda _: ("UTC", None),
+    )
+    with source.connect() as db:
+        trigger = db.execute("SELECT sql FROM sqlite_schema WHERE name='grading_context_immutable'").fetchone()[0]
+        db.execute("DROP TRIGGER grading_context_immutable")
+        db.execute(f"UPDATE grading_requests SET {column} = ?", (payload,))
+        db.execute(trigger)
+
+    live = Database(tmp_path / "live")
+    live.save_preferences({"timezone": "Asia/Tokyo"}, expected_version=0)
+    with pytest.raises(BackupError, match="valid Daily ML backup"):
+        live.restore_backup(source.path)
+    assert live.get_preferences().values == {"timezone": "Asia/Tokyo"}
+    with pytest.raises(BackupError, match="valid Daily ML backup"):
+        source.create_backup()
+    assert not list(source.backup_dir.iterdir())
+
+
+def test_slow_online_backup_completes_while_pages_keep_copying(monkeypatch):
+    """A long but uncontended multi-batch copy finishes successfully."""
+    elapsed = 0
+
+    class SlowSource(sqlite3.Connection):
+        """Simulate scheduling delay between genuine SQLite page transfers."""
+
+        def backup(self, target, *, pages, progress, sleep):
+            """Advance the simulated clock after each batch."""
+            def delayed_callback(status, remaining, total):
+                nonlocal elapsed
+                elapsed += 1.02
+                progress(status, remaining, total)
+
+            super().backup(target, pages=pages, progress=delayed_callback, sleep=sleep)
+
+    monkeypatch.setattr("daily_ml.database.time.monotonic", lambda: elapsed)
+    with sqlite3.connect(":memory:", factory=SlowSource) as source, sqlite3.connect(":memory:") as target:
+        source.execute("CREATE TABLE large_data (payload BLOB)")
+        source.execute("INSERT INTO large_data VALUES (zeroblob(1000000))")
+        source.commit()
+        Database._online_backup(source, target)
+        assert target.execute("SELECT length(payload) FROM large_data").fetchone() == (1_000_000,)
+
+
+def test_continuously_locked_source_aborts_online_backup(tmp_path, monkeypatch):
+    """An exclusive SQLite transaction blocks every retry until the contention timeout."""
+    path = tmp_path / "locked.sqlite3"
+    monkeypatch.setattr("daily_ml.database.SQLITE_WAIT_SECONDS", 0.05)
+    with sqlite3.connect(path) as owner, sqlite3.connect(path, timeout=0) as source:
+        owner.execute("CREATE TABLE records (id INTEGER)")
+        owner.execute("BEGIN EXCLUSIVE")
+        with sqlite3.connect(":memory:") as target, pytest.raises(BackupError, match="remained busy"):
+            Database._online_backup(source, target)
+
+
+def test_historical_context_and_clarification_survive_restore(tmp_path):
+    """Requests saved before objections existed retain their feedback and usage."""
+    source = Database(tmp_path / "source")
+    import_bank(source, validate_bank())
+    practice = Practice(source, answer_limit=8_000)
+    item = practice.today("UTC").selections[0].item
+    practice.submit(
+        item.id, "Disposable historical answer", expected_version=0,
+        resolve_settings=lambda _: ("UTC", None),
+    )
+    feedback = {"status": "needs_clarification", "explanation": "Which metric would you compare?"}
+    with source.connect() as db:
+        trigger = db.execute("SELECT sql FROM sqlite_schema WHERE name='grading_context_immutable'").fetchone()[0]
+        db.execute("DROP TRIGGER grading_context_immutable")
+        db.execute(
+            """UPDATE grading_requests SET context_json = json_remove(context_json, '$.objection'),
+               state = 'needs_clarification', feedback_json = ?, usage_json = ?""",
+            (json.dumps(feedback), '{"input_tokens":10}'),
+        )
+        db.execute(trigger)
+
+    receiver = Database(tmp_path / "receiver")
+    receiver.restore_backup(source.create_backup())
+    request = Practice(receiver, answer_limit=8_000).submission(item.id)["request"]
+    assert request["feedback"] == feedback
+    assert request["usage"] == {"input_tokens": 10}

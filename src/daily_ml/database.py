@@ -182,6 +182,25 @@ def _validate_practice_snapshots(connection: sqlite3.Connection) -> None:
             raise ValueError("practice snapshot differs from its immutable bank version")
 
 
+def _validate_grading_payloads(connection: sqlite3.Connection) -> None:
+    """Verify each saved grading payload against its context and display format."""
+    from .grading import GradingContext, validate_feedback
+
+    for context_json, feedback_json, usage_json in connection.execute(
+        "SELECT context_json, feedback_json, usage_json FROM grading_requests"
+    ):
+        context = GradingContext.model_validate_json(context_json)
+        feedback = json.loads(feedback_json) if feedback_json else None
+        if feedback is not None:
+            validate_feedback({"feedback": feedback}, context)
+        usage = json.loads(usage_json) if usage_json else None
+        if usage is not None and (
+            not isinstance(usage, dict)
+            or any(type(count) is not int or count < 0 for count in usage.values())
+        ):
+            raise ValueError("invalid grading usage")
+
+
 def _validate_table_contracts(connection: sqlite3.Connection, recorded_tables: set[str]) -> None:
     """Require SQL keys and relationships relied on by supported durable layouts."""
     for table, required_keys in _REQUIRED_UNIQUE_KEYS.items():
@@ -328,18 +347,27 @@ class Database:
                 from .bank import validate_saved_question_versions
 
                 validate_saved_question_versions(connection)
+            if "grading_requests" in tables:
+                _validate_grading_payloads(connection)
             if "practice_items" in recorded_tables:
                 _validate_practice_snapshots(connection)
-        except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError, ZoneInfoNotFoundError):
+        except (sqlite3.Error, TypeError, ValueError, RecursionError, ZoneInfoNotFoundError):
             raise BackupError("The selected file is not a valid Daily ML backup.") from None
 
     @staticmethod
     def _online_backup(source: sqlite3.Connection, target: sqlite3.Connection) -> None:
         """Copy a SQLite database while bounding busy/locked retry time."""
-        deadline = time.monotonic() + SQLITE_WAIT_SECONDS
+        busy_since = None
 
-        def check_deadline(_: int, __: int, ___: int) -> None:
-            if time.monotonic() >= deadline:
+        def check_deadline(status: int, remaining: int, total: int) -> None:
+            nonlocal busy_since
+            if status not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                busy_since = None
+                return
+            now = time.monotonic()
+            if busy_since is None:
+                busy_since = now
+            if now - busy_since >= SQLITE_WAIT_SECONDS:
                 raise BackupError(
                     "SQLite remained busy while creating a backup. Close the other Daily ML process and retry."
                 )
