@@ -197,6 +197,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                                       "agreement": summary.agreement_count, "critical_coverage": summary.critical_coverage_count,
                                       "release_passed": summary.release_passed, "paused": summary.paused_state,
                                       "interrupted": interrupted}, sort_keys=True))
+                except PackageNotFoundError:
+                    parser.exit(1, "Daily ML Practice: Could not read installed package versions. "
+                                   "Reinstall Daily ML Practice and its dependencies.\n")
                 finally:
                     connection.close()
             return 1 if interrupted else 0
@@ -225,9 +228,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     except KeyboardInterrupt:
         return 0
-    except PackageNotFoundError:
-        parser.exit(1, "Daily ML Practice: Could not read installed package versions. "
-                       "Reinstall Daily ML Practice and its dependencies.\n")
     except (BankError, ConfigError, LaunchError, StorageError) as error:
         parser.exit(1, f"Daily ML Practice: {error}\n")
     except (OSError, sqlite3.Error):
