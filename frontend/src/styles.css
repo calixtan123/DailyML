@@ -56,6 +56,12 @@ h3 { font-size: 14px; margin-bottom: 6px; }
 .settings-row { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; justify-content: space-between; }
 .connection-row { margin-bottom: 18px; }
 .settings-row > div:first-child { min-width: 0; overflow-wrap: anywhere; }
+.preferences, .grading { overflow-wrap: anywhere; }
+.model-settings { border-bottom: 1px solid var(--line); margin-bottom: 16px; padding-bottom: 16px; }
+.model-actions, .preference-model, .preference-precedence, .observed-usage { margin-top: 16px; }
+.model-actions select { min-width: 0; }
+.preference-precedence ol { margin: 8px 0 0; padding-left: 21px; }
+.observed-usage { border-top: 1px solid var(--line); padding-top: 16px; }
 .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0; }
 .state, label { font-weight: 650; }
 .authorized { color: var(--accent); }
@@ -81,6 +87,7 @@ button, .button, input, select {
 button, .button { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; cursor: pointer; text-decoration: none; }
 button:hover:not(:disabled), .button:hover { background: #35353a; }
 button:disabled { opacity: 0.55; cursor: default; }
+button[aria-disabled='true'] { opacity: 0.55; cursor: default; }
 .primary { color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
 .primary:hover:not(:disabled) { background: #a1c1f2; }
 .chatgpt-button { background: #fff; color: #000; border-color: #fff; }

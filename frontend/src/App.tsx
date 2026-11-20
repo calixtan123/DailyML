@@ -7,6 +7,7 @@ import { GradingSettings, type GradingAction } from './GradingSettings'
 import { History } from './History'
 import { Today, type LeaveToday } from './Today'
 import { TimezoneSettings } from './TimezoneSettings'
+import type { Preferences } from './preferences'
 
 type RetainedGradingAction = { account: string; action: GradingAction }
 type Page = 'Today' | 'History' | 'Settings'
@@ -31,6 +32,11 @@ function SettingsPage({ retainedAction, setRetainedAction }: {
   setRetainedAction: Dispatch<SetStateAction<RetainedGradingAction | undefined>>
 }) {
   const [gradingAccount, setGradingAccount] = useState<GradingAccount>()
+  const [preferences, setPreferences] = useState<Preferences>()
+
+  const updatePreferences = useCallback((next: Preferences) => {
+    setPreferences(previous => previous && previous.version > next.version ? previous : next)
+  }, [])
 
   const updateGradingAccount = useCallback((account: GradingAccount) => {
     setGradingAccount(account)
@@ -58,8 +64,10 @@ function SettingsPage({ retainedAction, setRetainedAction }: {
         connected={typeof gradingAccount === 'string'}
         uncertainAction={retainedAction && retainedAction.account === gradingAccount ? retainedAction.action : undefined}
         onUncertainActionChange={updateUncertainAction}
+        latestPreferences={preferences}
+        onPreferencesChange={updatePreferences}
       />
-      <TimezoneSettings request={request} />
+      <TimezoneSettings request={request} latestPreferences={preferences} onPreferencesChange={updatePreferences} />
     </>
   )
 }

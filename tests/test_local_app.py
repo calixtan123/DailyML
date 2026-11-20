@@ -119,11 +119,13 @@ def test_preference_mutations_are_versioned_and_hide_invalid_payloads(client):
     """Display effective timezone, save once, and reject stale or invalid edits."""
     headers = bootstrap(client)
     assert client.get("/api/settings").json() == {
-        "timezone": "Europe/London", "version": 0, "source": "default"
+        "timezone": "Europe/London", "version": 0, "source": "default",
+        "model_id": None, "model_source": "default",
     }
     edit = {"timezone": "UTC", "version": 0}
     assert client.put("/api/settings", headers=headers, json=edit).json() == {
-        "timezone": "UTC", "version": 1, "source": "preferences"
+        "timezone": "UTC", "version": 1, "source": "preferences",
+        "model_id": None, "model_source": "default",
     }
     assert client.put("/api/settings", headers=headers, json=edit).status_code == 409
     response = client.put("/api/settings", headers=headers, json={"timezone": ["secret"], "version": 1})
@@ -138,7 +140,8 @@ def test_settings_exposes_override_provenance(tmp_path, assets):
     with TestClient(create_app(settings, port=49152, assets_dir=assets), base_url=ORIGIN) as client:
         headers = bootstrap(client)
         assert client.get("/api/settings").json() == {
-            "timezone": "Asia/Tokyo", "version": 0, "source": "environment"
+            "timezone": "Asia/Tokyo", "version": 0, "source": "environment",
+            "model_id": None, "model_source": "default",
         }
         assert client.put("/api/settings", headers=headers, json={"timezone": "UTC", "version": 0}).status_code == 409
 
