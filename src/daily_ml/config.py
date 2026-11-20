@@ -10,7 +10,7 @@ from datetime import date
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .database import Database, Preferences
+from .database import Database, Preferences, validate_editable_preferences
 
 EDITABLE = {"timezone", "model_id"}
 TEXT_KEYS = {"data_dir", "timezone", "model_id"}
@@ -100,6 +100,14 @@ def _resolve_path(value: object, *, key: str, base: Path | None = None) -> Path:
 
 def _validate(values: dict[str, object], allowed: set[str]) -> None:
     """Validate one settings layer independently of higher-priority overrides."""
+    if allowed == EDITABLE:
+        try:
+            validate_editable_preferences(values)
+        except ValueError as error:
+            if str(error) == "unsupported preference key":
+                raise ConfigError("Unsupported Daily ML configuration key. See config.example.toml.") from None
+            raise _error(str(error)) from None
+        return
     if values.keys() - allowed:
         raise ConfigError("Unsupported Daily ML configuration key. See config.example.toml.")
     if "timezone" in values:
