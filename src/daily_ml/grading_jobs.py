@@ -157,6 +157,12 @@ class GradingJobs:
                           WHERE kind='connection_test' AND state IN ('queued','preparing')""", (self.clock(),))
             db.execute("""UPDATE grading_requests SET state='queued', error='unsent'
                           WHERE kind='practice' AND state IN ('queued','preparing')""")
+            # Evaluation work is explicitly resumed by its locked CLI invocation. Unlike an
+            # in-flight request, a preparing request has no pre-send reservation and is safe to
+            # return to the queue after a process crash.
+            db.execute("""UPDATE grading_requests SET state='queued', error=NULL, finished_at=NULL
+                          WHERE kind='evaluation' AND state='preparing'
+                          AND NOT EXISTS (SELECT 1 FROM model_attempts WHERE request_id=grading_requests.id)""")
 
     def enqueue_connection_test(self, idempotency_key: str, model_id: str, *, retry_of: str | None = None) -> dict:
         """Save a reference test or reuse a previous click or active test.
@@ -210,6 +216,50 @@ class GradingJobs:
                             context))
             db.execute("INSERT INTO grading_action_keys VALUES (?,?)", (idempotency_key, request_id))
             return public_request(db.execute("SELECT * FROM grading_requests WHERE id=?", (request_id,)).fetchone())
+
+    def enqueue_evaluation(
+        self,
+        context: GradingContext,
+        model_id: str,
+        *,
+        retry_of: str | None = None,
+        mode: str = "schema",
+        connection: sqlite3.Connection | None = None,
+    ) -> str:
+        """Persist one fixed evaluation case before it can be sent.
+
+        Parameters
+        ----------
+        context : GradingContext
+            Immutable reviewed case context, including its fixed answer.
+        model_id : str
+            Account model selected for the explicit evaluation invocation.
+        retry_of : str or None
+            Previous evaluation request when resuming a request that was already admitted.
+        mode : str
+            The saved output mode from the previous request.
+
+        Returns
+        -------
+        str
+            The durable ledger request identifier.
+        """
+        request_id = str(uuid4())
+        def insert(db: sqlite3.Connection) -> None:
+            """Write the evaluation request into the caller's transaction."""
+            db.execute(
+                """INSERT INTO grading_requests
+                   (id,kind,state,model_id,created_at,retry_of,schema_mode,prompt_version,schema_version,context_json)
+                   VALUES (?,'evaluation','queued',? ,?,?,?, ?,?,?)""",
+                (request_id, model_id, self.clock(), retry_of, mode, PROMPT_VERSION, SCHEMA_VERSION,
+                 context.model_dump_json()),
+            )
+        if connection is None:
+            with self.database.connect() as db:
+                insert(db)
+        else:
+            insert(connection)
+        return request_id
 
     def get_request(self, request_id: str) -> dict | None:
         """Return the saved result without contacting the provider.
@@ -269,7 +319,8 @@ class GradingJobs:
             db.execute("BEGIN IMMEDIATE")
             job = db.execute(
                 """SELECT * FROM grading_requests WHERE state='queued' AND error IS NULL
-                   AND (? IS NULL OR id=?) ORDER BY rowid LIMIT 1""", (request_id, request_id)
+                   AND (kind IN ('connection_test','practice') OR id=?)
+                   AND (? IS NULL OR id=?) ORDER BY rowid LIMIT 1""", (request_id, request_id, request_id)
             ).fetchone()
             if job:
                 db.execute("UPDATE grading_requests SET state='preparing' WHERE id=?", (job["id"],))

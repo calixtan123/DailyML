@@ -621,7 +621,7 @@ class Practice:
                 if version != expected_version:
                     raise DraftConflict(Draft(draft_text, version))
                 request_id = enqueue_practice_request(
-                    connection, self._grading_context(snapshot, text), model_id, day.timestamp,
+                    connection, GradingContext.from_question_snapshot(snapshot, text), model_id, day.timestamp,
                 )
                 connection.execute(
                     "INSERT INTO practice_submissions VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1403,23 +1403,6 @@ class Practice:
                 "can_send": False, "message": None,
             },
         }
-
-    @staticmethod
-    def _grading_context(snapshot: str, text: str) -> GradingContext:
-        """Freeze only the stored question, rubric, references and answer for transport."""
-        record = json.loads(snapshot)
-        return GradingContext(
-            version=f"v{record['version']}",
-            question=record["prompt"],
-            answer=text,
-            reference=record["reference_explanation"],
-            criteria=record["criteria"],
-            critical_misconceptions={
-                f"misconception-{index}": value
-                for index, value in enumerate(record["critical_misconceptions"], start=1)
-            },
-            sources={source["id"]: source["url"] for source in record["sources"]},
-        )
 
     def _validate_text(self, text: str, *, submitted: bool = False) -> None:
         """Apply a shared code point limit and reject blank original answers."""
