@@ -191,6 +191,24 @@ def test_busy_online_backup_leaves_no_partial_file_and_keeps_app_usable(tmp_path
     assert live.get_preferences().values == {"timezone": "UTC"}
 
 
+def test_restore_preparation_failure_does_not_claim_a_missing_recovery_copy(tmp_path, monkeypatch):
+    """A restore error before rollback publication reports that exact recoverable state."""
+    live = Database(tmp_path / "live")
+    source = Database(tmp_path / "source")
+    backup = source.create_backup()
+
+    def no_space(source_connection, target_connection):
+        raise OSError("no space left")
+
+    monkeypatch.setattr(Database, "_online_backup", staticmethod(no_space))
+
+    with pytest.raises(BackupError, match="before replacing") as raised:
+        live.restore_backup(backup)
+
+    assert "pre-restore copy" not in str(raised.value)
+    assert live.get_preferences().values == {}
+
+
 def test_restore_cli_refuses_to_replace_data_owned_by_running_app(tmp_path, capsys):
     """The restore command cannot race the launcher that owns the installation."""
     data_dir = tmp_path / "live"

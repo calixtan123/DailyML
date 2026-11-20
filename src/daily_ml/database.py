@@ -300,6 +300,11 @@ class Database:
                 ) from None
             if isinstance(error, BackupError):
                 raise
+            if pre_restore is None:
+                raise BackupError(
+                    "Could not prepare restore before replacing the live database. "
+                    "The existing database was not changed; check disk space and permissions before retrying."
+                ) from None
             raise BackupError(
                 "Could not complete restore. The verified pre-restore copy is retained in backups; "
                 "check disk space and permissions before retrying."
