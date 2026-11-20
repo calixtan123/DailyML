@@ -122,6 +122,39 @@ class EvaluationRunner:
                 run_id TEXT NOT NULL REFERENCES grader_evaluation_runs(id), case_id TEXT NOT NULL,
                 request_id TEXT NOT NULL UNIQUE REFERENCES grading_requests(id), PRIMARY KEY(run_id, case_id)
             )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS grader_evaluation_attempts (
+                run_id TEXT NOT NULL REFERENCES grader_evaluation_runs(id), case_id TEXT NOT NULL,
+                request_id TEXT NOT NULL UNIQUE REFERENCES grading_requests(id),
+                PRIMARY KEY(run_id, case_id, request_id)
+            )""")
+            # Existing interrupted runs predate the history table. Their current request is still
+            # an auditable attempt in the production ledger, so retain it during this additive migration.
+            db.execute("""INSERT OR IGNORE INTO grader_evaluation_attempts(run_id, case_id, request_id)
+                          SELECT run_id, case_id, request_id FROM grader_evaluation_cases""")
+
+    def _has_outbound_reservation(self, request_id: str) -> bool:
+        """Return whether this request might already have reached the provider."""
+        with self.database.connect() as db:
+            return db.execute("SELECT 1 FROM model_attempts WHERE request_id=?", (request_id,)).fetchone() is not None
+
+    def _resume_request(self, run_id: str, case: EvaluationCase, row: sqlite3.Row) -> str:
+        """Reuse a proven-unsent pause or create an immutable successor after an outbound reservation."""
+        request_id, _state, saved_model, mode, context_json = row
+        if not self._has_outbound_reservation(request_id):
+            with self.database.connect() as db:
+                db.execute("""UPDATE grading_requests SET state='queued', error=NULL, finished_at=NULL
+                              WHERE id=? AND state IN ('awaiting_access','awaiting_allowance')""", (request_id,))
+            return request_id
+        with self.database.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            successor_id = self.jobs.enqueue_evaluation(
+                GradingContext.model_validate_json(context_json), saved_model, retry_of=request_id,
+                mode=mode, connection=db,
+            )
+            db.execute("UPDATE grader_evaluation_cases SET request_id=? WHERE run_id=? AND case_id=? AND request_id=?",
+                       (successor_id, run_id, case.id, request_id))
+            db.execute("INSERT INTO grader_evaluation_attempts VALUES (?,?,?)", (run_id, case.id, successor_id))
+            return successor_id
 
     def _run_id(self, model_id: str, cases: tuple[EvaluationCase, ...]) -> str:
         """Reuse the matching incomplete version set for this explicit model."""
@@ -145,7 +178,8 @@ class EvaluationRunner:
         paused = None
         for case in selected:
             with self.database.connect() as db:
-                row = db.execute("""SELECT r.id, r.state FROM grader_evaluation_cases c JOIN grading_requests r
+                row = db.execute("""SELECT r.id, r.state, r.model_id, r.schema_mode, r.context_json
+                                    FROM grader_evaluation_cases c JOIN grading_requests r
                                     ON r.id=c.request_id WHERE c.run_id=? AND c.case_id=?""", (run_id, case.id)).fetchone()
             if row and row[1] in TERMINAL_STATES:
                 resumed += 1
@@ -154,18 +188,14 @@ class EvaluationRunner:
                 paused = row[1]
                 break
             if row and row[1] in {"awaiting_access", "awaiting_allowance"}:
-                with self.database.connect() as db:
-                    changed = db.execute("""UPDATE grading_requests SET state='queued', error=NULL, finished_at=NULL
-                                          WHERE id=? AND state IN ('awaiting_access','awaiting_allowance')""", (row[0],))
-                if changed.rowcount != 1:
-                    paused = row[1]
-                    break
+                request_id = self._resume_request(run_id, case, row)
             if row is None:
                 with self.database.connect() as db:
                     db.execute("BEGIN IMMEDIATE")
                     request_id = self.jobs.enqueue_evaluation(_context(case), model_id, connection=db)
                     db.execute("INSERT INTO grader_evaluation_cases VALUES (?,?,?)", (run_id, case.id, request_id))
-            else:
+                    db.execute("INSERT INTO grader_evaluation_attempts VALUES (?,?,?)", (run_id, case.id, request_id))
+            elif row[1] not in {"awaiting_access", "awaiting_allowance"}:
                 request_id = row[0]
             await self.jobs.run_pending(request_id)
             state = self.jobs.get_request(request_id)["state"]
@@ -181,8 +211,15 @@ class EvaluationRunner:
         with self.database.connect() as db:
             rows = db.execute("""SELECT c.case_id, r.state, r.grade, r.feedback_json FROM grader_evaluation_cases c
                                JOIN grading_requests r ON r.id=c.request_id WHERE c.run_id=?""", (run_id,)).fetchall()
-            usage = db.execute("""SELECT COUNT(*) FROM model_attempts a JOIN grader_evaluation_cases c
-                                ON c.request_id=a.request_id WHERE c.run_id=?""", (run_id,)).fetchone()[0]
+            usage = db.execute("""SELECT COUNT(*) FROM (
+                                    SELECT a.request_id FROM model_attempts a
+                                    JOIN grader_evaluation_attempts e ON e.request_id=a.request_id
+                                    WHERE e.run_id=?
+                                    UNION ALL
+                                    SELECT a.request_id FROM model_rate_limit_retries a
+                                    JOIN grader_evaluation_attempts e ON e.request_id=a.request_id
+                                    WHERE e.run_id=?
+                                )""", (run_id, run_id)).fetchone()[0]
         completed = [row for row in rows if row[1] in TERMINAL_STATES]
         agreement = sum(
             row[1] in selected[row[0]].expected_states and
@@ -207,6 +244,15 @@ class EvaluationRunner:
             rows = db.execute("""SELECT c.case_id, r.state, r.grade, r.feedback_json, r.error, r.usage_json
                                FROM grader_evaluation_cases c JOIN grading_requests r ON r.id=c.request_id
                                WHERE c.run_id=? ORDER BY c.rowid""", (run_id,)).fetchall()
+            counts = dict(db.execute("""SELECT case_id, COUNT(*) FROM (
+                                          SELECT e.case_id, a.request_id FROM model_attempts a
+                                          JOIN grader_evaluation_attempts e ON e.request_id=a.request_id
+                                          WHERE e.run_id=?
+                                          UNION ALL
+                                          SELECT e.case_id, a.request_id FROM model_rate_limit_retries a
+                                          JOIN grader_evaluation_attempts e ON e.request_id=a.request_id
+                                          WHERE e.run_id=?
+                                      ) GROUP BY case_id""", (run_id, run_id)).fetchall())
         if run is None:
             raise ValueError("Unknown evaluation run.")
         saved = {row[0]: row[1:] for row in rows}
@@ -221,7 +267,8 @@ class EvaluationRunner:
                              "expected_critical_ids": case.expected_critical_ids, "state": state, "grade": grade,
                              "matches_expected": matches, "error": error,
                              "critical_misconceptions": feedback.get("critical_misconception_ids", []),
-                             "corrections": feedback.get("corrections", []), "usage": json.loads(usage_json) if usage_json else None})
+                             "corrections": feedback.get("corrections", []), "usage": json.loads(usage_json) if usage_json else None,
+                             "attempt_count": counts.get(case_id, 0)})
         summary = self.summary(run_id, cases.values())
         return {"run_id": run_id, "started_at": run[2], "model": run[0], "fixture": run[1],
                 "versions": dependency_versions(), "completed_count": summary.completed_count,

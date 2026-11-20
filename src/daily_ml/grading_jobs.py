@@ -211,7 +211,15 @@ class GradingJobs:
             db.execute("INSERT INTO grading_action_keys VALUES (?,?)", (idempotency_key, request_id))
             return public_request(db.execute("SELECT * FROM grading_requests WHERE id=?", (request_id,)).fetchone())
 
-    def enqueue_evaluation(self, context: GradingContext, model_id: str, *, connection: sqlite3.Connection | None = None) -> str:
+    def enqueue_evaluation(
+        self,
+        context: GradingContext,
+        model_id: str,
+        *,
+        retry_of: str | None = None,
+        mode: str = "schema",
+        connection: sqlite3.Connection | None = None,
+    ) -> str:
         """Persist one fixed evaluation case before it can be sent.
 
         Parameters
@@ -220,6 +228,10 @@ class GradingJobs:
             Immutable reviewed case context, including its fixed answer.
         model_id : str
             Account model selected for the explicit evaluation invocation.
+        retry_of : str or None
+            Previous evaluation request when resuming a request that was already admitted.
+        mode : str
+            The saved output mode from the previous request.
 
         Returns
         -------
@@ -231,9 +243,10 @@ class GradingJobs:
             """Write the evaluation request into the caller's transaction."""
             db.execute(
                 """INSERT INTO grading_requests
-                   (id,kind,state,model_id,created_at,schema_mode,prompt_version,schema_version,context_json)
-                   VALUES (?,'evaluation','queued',? ,?,'schema',?,?,?)""",
-                (request_id, model_id, self.clock(), PROMPT_VERSION, SCHEMA_VERSION, context.model_dump_json()),
+                   (id,kind,state,model_id,created_at,retry_of,schema_mode,prompt_version,schema_version,context_json)
+                   VALUES (?,'evaluation','queued',? ,?,?,?, ?,?,?)""",
+                (request_id, model_id, self.clock(), retry_of, mode, PROMPT_VERSION, SCHEMA_VERSION,
+                 context.model_dump_json()),
             )
         if connection is None:
             with self.database.connect() as db:
