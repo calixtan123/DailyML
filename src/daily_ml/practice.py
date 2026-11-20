@@ -837,6 +837,10 @@ class Practice:
                    ON CONFLICT(question_id, local_date) DO NOTHING""",
                 (question_id, day.local_date, item_id),
             )
+            connection.execute(
+                "UPDATE practice_items SET last_practised_date = ? WHERE id = ?",
+                (day.local_date, item_id),
+            )
             record_gap(connection, item_id, day.timestamp, day.local_date, self.review_intervals)
             connection.execute(
                 "INSERT INTO practice_gap_actions VALUES (?, ?)", (idempotency_key, item_id)
@@ -1295,8 +1299,8 @@ class Practice:
                    LEFT JOIN practice_submissions AS submission ON submission.item_id = item.id
                    LEFT JOIN practice_gap_completions AS gap ON gap.item_id = item.id
                    LEFT JOIN grading_requests AS request ON request.id = submission.current_request_id
-                   WHERE (gap.item_id IS NOT NULL OR (submission.item_id IS NOT NULL
-                          AND (submission.completed_date >= ? OR request.state <> 'assessed')))
+                   WHERE (COALESCE(gap.completed_date, submission.completed_date) >= ?
+                          OR request.state <> 'assessed')
                      AND NOT EXISTS (
                         SELECT 1 FROM practice_selections WHERE local_date = ? AND item_id = item.id
                      )
