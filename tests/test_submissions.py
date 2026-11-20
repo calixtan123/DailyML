@@ -629,14 +629,7 @@ def test_supported_original_is_frozen_through_clarification_and_revision(learner
     client.app.state.grading.provider = provider(assess)
     item_id = _today(client, headers)["selections"][0]["item"]["id"]
     base = f"/api/practice/items/{item_id}"
-    with db.connect() as connection:
-        # Simulate a persisted pre-answer support record in the submission transaction.
-        connection.execute("""
-            CREATE TRIGGER record_test_original_support AFTER INSERT ON practice_submissions
-            BEGIN
-                INSERT INTO practice_submission_support (item_id, supported) VALUES (NEW.item_id, 1);
-            END
-        """)
+    assert client.post(f"{base}/help/hint", headers=headers).status_code == 200
     response = _submit(client, headers, item_id, "I used the reference example.")
     assert response.status_code == 202
     original = client.get(f"{base}/submission").json()
