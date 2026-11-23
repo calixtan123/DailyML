@@ -9,7 +9,7 @@ from collections.abc import Callable
 from uuid import uuid4
 
 from .config import Settings
-from .database import Database
+from .database import Database, PreferenceConflict
 from .grading import PROMPT_VERSION, SCHEMA_VERSION, GradingContext, calculate_grade
 from .provider import MESSAGES, DispatchCancelled, Provider, ProviderFailure
 from .scheduling import record_initial_assessment
@@ -179,6 +179,8 @@ class GradingJobs:
         ------
         RetryConflict
             If a retry does not identify recoverable work for this model.
+        PreferenceConflict
+            If a new action names a model different from the effective selection.
         """
         with self.database.connect() as db:
             db.row_factory = sqlite3.Row
@@ -187,6 +189,9 @@ class GradingJobs:
                                   ON r.id=k.request_id WHERE k.action_key=?""", (idempotency_key,)).fetchone()
             if prior:
                 return public_request(prior)
+            selected, _ = self.settings.effective_model(self.database.read_preferences(db))
+            if selected is not None and model_id != selected:
+                raise PreferenceConflict("The selected model changed. Refresh the model catalog before testing.")
             active = db.execute("""SELECT * FROM grading_requests WHERE kind='connection_test'
                                    AND state IN ('queued','preparing','in_flight') LIMIT 1""").fetchone()
             mode = "schema"

@@ -32,9 +32,11 @@ To connect your account, open **Settings**, select **Continue with ChatGPT**, co
 
 ## Test grading with your ChatGPT plan
 
-After signing in, choose a **Grading model** from your account's list. Read the **Reference question** and **Reference answer** in Settings. **Run connection test** sends this fixed example, its marking guide and sources to OpenAI and can use your ChatGPT plan or credits. Opening Settings or selecting a model does not send a grading request.
+After signing in, choose a **Grading model** from your account's list and select **Save model**. Use **Refresh model catalog** to check what's currently available. If a saved model disappears, choose and save a replacement. If TOML or an environment variable controls the choice, update that configuration and restart the app. Read the **Reference question** and **Reference answer** before selecting **Run connection test**. This explicit action sends the fixed example, its marking guide and sources to OpenAI and can use your ChatGPT plan or credits.
 
-Settings shows the model's feedback and a local grade from 0 to 3, or its request for clarification. **Model attempts in the last 24 hours** counts this installation's outbound and uncertain attempts. If a model rejects structured output, **Retry in JSON mode** authorizes another attempt. The test leaves your practice history untouched. Live account verification is pending. [Verification record](docs/DML-2-verification.md)
+Settings shows the model's feedback and a local grade from 0 to 3, or its request for clarification. **Model attempts in the last 24 hours** counts this installation's outbound and uncertain attempts, including practice, tests and retries, over a rolling UTC window. **Refresh observed usage** updates the count from local records. Other ChatGPT and Codex activity can share your plan allowance. Use **Manage usage and credits** to view plan usage and control additional credits. If a model rejects structured output, **Retry in JSON mode** authorizes another attempt.
+
+The learner confirmed a live connection test on 19 November 2026 under DML-2. The DML-11 preference and usage changes were verified with offline tests. [DML-2 verification record](docs/DML-2-verification.md)
 
 ## Clarify or revise a practice answer
 
@@ -58,7 +60,7 @@ The default directory is `~/Library/Application Support/Daily ML Practice/`. It 
 
 On the first upgrade to self-reported gaps, the app verifies a private `daily-ml-before-gap-upgrade-*.sqlite3` backup before migrating existing practice credits. If launch reports a local data error during the upgrade, the migration rolls back. Check available space and permissions in the data directory before retrying. Keep the backup if you need to recover the pre-upgrade records.
 
-Configuration loads packaged defaults, saved SQLite preferences, installation TOML, then `DML_` environment overrides. The launcher resolves the data directory before it opens SQLite. Settings shows whether the timezone is controlled by an override.
+Configuration loads packaged defaults, saved SQLite preferences, installation TOML, then `DML_` environment overrides. The launcher resolves the data directory before it opens SQLite. **Learning preferences** shows the effective timezone and grading model and the source of each value, including while signed out. Changes apply to future operations. Existing recommendation dates, completion dates, question snapshots and assessments retain their original values. If another tab saves preferences while you are editing, reload the preferences or refresh the model catalog, review the current values and save again.
 
 Copy [config.example.toml](config.example.toml) to the default directory as `config.toml`, or pass `daily-ml run --config "/path with spaces/config.toml"`. `DML_CONFIG` also selects the TOML. Paths in the TOML can be relative to that file. Use absolute or home-relative paths in environment overrides.
 

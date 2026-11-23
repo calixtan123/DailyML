@@ -13,6 +13,7 @@ import httpx
 import openai
 from pydantic import BaseModel, Field
 
+from .config import MODEL_ID_MAX_LENGTH, MODEL_ID_PATTERN
 from .connection import Connection, ConnectionError
 from .grading import FeedbackEnvelope, GradingContext, validate_feedback
 from .openai_oauth import RESOURCE
@@ -64,7 +65,7 @@ class DispatchCancelled(asyncio.CancelledError):
 class AccountModel(BaseModel):
     """A selectable entry in the account-specific provider order."""
 
-    slug: str = Field(min_length=1, max_length=256, pattern=r"^[a-zA-Z0-9._:/-]+$")
+    slug: str = Field(min_length=1, max_length=MODEL_ID_MAX_LENGTH, pattern=MODEL_ID_PATTERN)
     display_name: str = Field(min_length=1, max_length=256)
 
 

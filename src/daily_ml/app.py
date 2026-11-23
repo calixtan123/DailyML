@@ -19,7 +19,9 @@ from .bank import (
     ID_PATTERN, QuestionPrompt, SectionNotFound, SectionSummary, import_bank, list_questions,
     list_sections, validate_bank,
 )
-from .config import ConfigError, Settings, save_user_settings
+from .config import (
+    MODEL_ID_MAX_LENGTH, MODEL_ID_PATTERN, OVERRIDE_SOURCES, ConfigError, Settings, save_user_settings,
+)
 from .connection import Connection, ConnectionError, ConnectionStatus, SignInStart
 from .database import Database, PreferenceConflict, Preferences
 from .grading import GradingContext
@@ -56,7 +58,7 @@ class ModelSelection(BaseModel):
     """Validate a selected provider slug for a local Settings action."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
-    model_id: str = Field(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9._:/-]+$")
+    model_id: str = Field(min_length=1, max_length=MODEL_ID_MAX_LENGTH, pattern=MODEL_ID_PATTERN)
 
 
 class ModelEdit(ModelSelection):
@@ -359,31 +361,37 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         """Return an allowlisted grading recovery message."""
         return _error(409, str(error))
 
-    model_override = settings.sources["model_id"] in ("installation", "environment")
+    def settings_payload(preferences: Preferences) -> dict[str, str | int | None]:
+        """Expose only editable settings and the source of their effective values."""
+        timezone, source = settings.effective_timezone(preferences)
+        model_id, model_source = settings.effective_model(preferences)
+        return {"timezone": timezone, "source": source, "version": preferences.version,
+                "model_id": model_id, "model_source": model_source}
 
     def model_preferences(preferences: Preferences) -> dict:
         """Expose effective selection without treating missing catalog entries as available."""
-        selected = settings.model_id if model_override else preferences.values.get("model_id")
-        return {"selected": selected, "version": preferences.version,
-                "source": settings.sources["model_id"] if model_override else "preferences" if selected else "default",
-                "overridden": model_override}
+        model_id, source = settings.effective_model(preferences)
+        return {"selected": model_id, "version": preferences.version,
+                "source": source, "overridden": source in OVERRIDE_SOURCES}
 
     @app.get("/api/connection/models")
     async def account_models(request: Request) -> dict:
         """Fetch the actual signed-in account's ordered model catalog."""
         models = await request.app.state.grading.provider.list_models()
-        return {"models": models, **model_preferences(database.get_preferences())}
+        preferences = database.get_preferences()
+        return {"models": models, **model_preferences(preferences), "settings": settings_payload(preferences)}
 
     @app.put("/api/connection/model")
     async def choose_model(edit: ModelEdit, request: Request) -> dict:
         """Persist a visible account model with the existing conditional preference write."""
-        if model_override:
-            raise PreferenceConflict("Model selection is overridden by installation configuration.")
+        if settings.sources["model_id"] in OVERRIDE_SOURCES:
+            raise PreferenceConflict("Model selection is controlled by a configuration override.")
         models = await request.app.state.grading.provider.list_models()
         if edit.model_id not in {model.slug for model in models}:
             raise ProviderFailure("model_unavailable")
         values = {**database.get_preferences().values, "model_id": edit.model_id}
-        return model_preferences(save_user_settings(settings, values, expected_version=edit.version))
+        saved = save_user_settings(settings, values, expected_version=edit.version)
+        return {**model_preferences(saved), "settings": settings_payload(saved)}
 
     @app.get("/api/connection/test")
     def reference_test(request: Request) -> dict:
@@ -393,8 +401,6 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
     @app.post("/api/connection/test", status_code=202)
     def start_test(action: TestAction, request: Request, background: BackgroundTasks) -> dict:
         """Persist one explicit connection test before allowing a worker to claim it."""
-        if model_override and action.model_id != settings.model_id:
-            raise PreferenceConflict("Use the model selected by installation configuration.")
         jobs = request.app.state.grading
         result = jobs.enqueue_connection_test(action.idempotency_key, action.model_id, retry_of=action.retry_of)
         if result["state"] == "queued":
@@ -411,14 +417,9 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         """Show the local rolling 24-hour outbound attempt count."""
         return {"attempts_24h": request.app.state.grading.usage_count()}
 
-    def settings_payload(preferences: Preferences) -> dict[str, str | int]:
-        """Show the effective timezone, version and override visible to the user."""
-        timezone, source = settings.effective_timezone(preferences)
-        return {"timezone": timezone, "version": preferences.version, "source": source}
-
     def practice_timezone() -> str:
         """Read the same effective timezone displayed in Settings."""
-        return str(settings_payload(database.get_preferences())["timezone"])
+        return settings.effective_timezone(database.get_preferences())[0]
 
     @app.exception_handler(PracticeItemNotFound)
     async def missing_practice_item(_request: Request, _error_detail: PracticeItemNotFound):
@@ -448,7 +449,7 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
     def submission_settings(connection: sqlite3.Connection) -> tuple[str, str | None]:
         """Use the timezone and model preferences in the locked submission snapshot."""
         preferences = database.read_preferences(connection)
-        return str(settings_payload(preferences)["timezone"]), model_preferences(preferences)["selected"]
+        return settings.effective_timezone(preferences)[0], settings.effective_model(preferences)[0]
 
     @app.exception_handler(HistoryCursorInvalid)
     async def invalid_history_filter(_request: Request, error: HistoryCursorInvalid):
@@ -598,15 +599,15 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         return practice.save_draft(str(item_id), edit.text, expected_version=edit.version, timezone=practice_timezone())
 
     @app.get("/api/settings")
-    def read_settings() -> dict[str, str | int]:
-        """Show effective timezone and provenance."""
+    def read_settings() -> dict[str, str | int | None]:
+        """Show the effective timezone, model and their provenance."""
         return settings_payload(database.get_preferences())
 
     @app.put("/api/settings")
-    def update_settings(edit: TimezoneEdit) -> dict[str, str | int]:
+    def update_settings(edit: TimezoneEdit) -> dict[str, str | int | None]:
         """Save the timezone only against the displayed preference version."""
-        if settings.sources["timezone"] in ("installation", "environment"):
-            raise PreferenceConflict("Timezone is overridden by installation configuration.")
+        if settings.sources["timezone"] in OVERRIDE_SOURCES:
+            raise PreferenceConflict("Timezone is controlled by a configuration override.")
         saved = database.get_preferences()
         values = {**saved.values, "timezone": edit.timezone}
         result = save_user_settings(settings, values, expected_version=edit.version)

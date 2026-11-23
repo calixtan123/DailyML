@@ -60,7 +60,8 @@ function stubLocalApi(account: Account = null, submitTest?: (options: RequestIni
       case '/api/usage':
         return Response.json({ attempts_24h: 0 })
       case '/api/settings':
-        return Response.json({ timezone: 'Europe/London', version: 1, source: 'default' })
+        return Response.json({ timezone: 'Europe/London', version: 1, source: 'default',
+          model_id: account?.model ?? null, model_source: account ? 'preferences' : 'default' })
       default:
         throw new Error(`Unexpected local request: ${path}`)
     }

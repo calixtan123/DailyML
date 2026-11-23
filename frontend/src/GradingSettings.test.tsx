@@ -1,14 +1,15 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { LocalRequest } from './api'
+import { LocalApiError, type LocalRequest } from './api'
 import { GradingSettings, type GradingAction } from './GradingSettings'
 
 afterEach(() => { cleanup(); vi.useRealTimers() })
 
 const question = { question: 'Which split?', answer: 'Training only.', sources: {} }
 const saved = { question: 'Original question?', answer: 'Original answer.', sources: { guide: 'https://example.test/v1' } }
-const models = { models: [{slug: 'model-z', display_name: 'Account model'}], selected: 'model-z', version: 0 }
+const models = { models: [{slug: 'model-z', display_name: 'Account model'}], selected: 'model-z', version: 0,
+  overridden: false, source: 'preferences' as const }
 const queued = { id: 'r1', state: 'queued', model_id: 'model-z', feedback: null, grade: null, reference: saved }
 const assessed = { ...queued, state: 'assessed', grade: 3, feedback: { status: 'assessed',
   summary: 'Training data only.', corrections: [], model_answer: 'Fit on training.', reasoning: ['Hold out test data.'],
@@ -79,6 +80,38 @@ describe('grading connection test', () => {
     expect(reads()).toBe(0)
   })
 
+  it('keeps the saved uncertain outcome visible when observed usage cannot be loaded', async () => {
+    const unknown = { ...queued, state: 'outcome_unknown', error: 'outcome_unknown',
+      message: 'The stream was interrupted. The provider may have used a plan request.' }
+    let usageAvailable = false
+    const request = vi.fn(async (path: string, options?: RequestInit) => {
+      if (path.endsWith('/models')) return models
+      if (path.endsWith('/usage')) {
+        if (!usageAvailable) throw new Error('Could not load usage.')
+        return { attempts_24h: 4 }
+      }
+      if (path.endsWith('/test') && options?.method === 'POST') throw new Error('Could not reach the local app.')
+      if (path.endsWith('/test')) return { reference: question, latest: unknown }
+      throw new Error('Unexpected route')
+    })
+    render(<GradingPanel request={request as LocalRequest} />)
+    expect((await screen.findByRole('alert')).textContent).toBe(unknown.message)
+    expect(screen.getByRole('button', { name: 'Retry connection test' })).toHaveProperty('disabled', false)
+    expect(screen.getByText('Model attempts in the last 24 hours: unavailable')).toBeTruthy()
+
+    const requestsBeforeRefresh = request.mock.calls.length
+    usageAvailable = true
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh observed usage' }))
+    expect(await screen.findByText('Model attempts in the last 24 hours: 4')).toBeTruthy()
+    expect(screen.getByRole('alert').textContent).toBe(unknown.message)
+    expect(request.mock.calls.slice(requestsBeforeRefresh).map(([path]) => path)).toEqual(['/api/usage'])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry connection test' }))
+    await screen.findByText('Could not reach the local app.')
+    expect(screen.getByText(unknown.message)).toBeTruthy()
+    expect(document.activeElement).toBe(screen.getByRole('alert'))
+  })
+
   it('recovers the retained test when the previously selected model is no longer available', async () => {
     vi.useFakeTimers()
     const initialAction = { model_id: 'model-z', idempotency_key: 'original-action', retry_of: 'r0' }
@@ -118,7 +151,58 @@ describe('grading connection test', () => {
     expect(sent).toEqual([initialAction])
     expect(screen.queryByRole('button', { name: 'Run connection test' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Check previous test' })).toBeNull()
-    expect(screen.getByRole('button', { name: 'Reload connection test' })).toHaveProperty('disabled', false)
+    expect(screen.getByRole('button', { name: 'Refresh model catalog' })).toHaveProperty('disabled', false)
+  })
+
+  it('shows a removed model after refresh and only saves the replacement on confirmation', async () => {
+    const selection = { selected: 'model-y', version: 1, source: 'preferences', overridden: false }
+    let currentCatalog = models
+    const writes: unknown[] = []
+    const request = vi.fn(async (path: string, options?: RequestInit) => {
+      if (path.endsWith('/models')) return currentCatalog
+      if (path.endsWith('/usage')) return { attempts_24h: 4 }
+      if (path.endsWith('/test')) return { reference: question, latest: null }
+      if (path.endsWith('/model')) {
+        writes.push(JSON.parse(String(options?.body)))
+        return selection
+      }
+      throw new Error('Unexpected route')
+    })
+    render(<GradingPanel request={request as LocalRequest} />)
+    const choice = await screen.findByRole('combobox', { name: 'Grading model' })
+    expect(choice).toHaveProperty('value', 'model-z')
+    const refresh = screen.getByRole('button', { name: 'Refresh model catalog' })
+    currentCatalog = { ...models, models: [{ slug: 'model-y', display_name: 'Replacement model' }] }
+    fireEvent.click(refresh)
+
+    expect((await screen.findByRole('alert')).textContent).toMatch(/model-z.*unavailable/i)
+    expect(screen.getByRole('button', { name: 'Run connection test' })).toHaveProperty('disabled', true)
+    fireEvent.change(choice, { target: { value: 'model-y' } })
+    expect(writes).toEqual([])
+    fireEvent.click(screen.getByRole('button', { name: 'Save model' }))
+    await screen.findByText('Model saved.')
+    expect(writes).toEqual([{ model_id: 'model-y', version: 0 }])
+    expect(screen.getByRole('button', { name: 'Run connection test' })).toHaveProperty('disabled', false)
+  })
+
+  it('focuses a failed model save and refreshes the catalog before another choice', async () => {
+    const list = { ...models, models: [...models.models, { slug: 'other-model', display_name: 'Other model' }] }
+    const request = vi.fn(async (path: string) => {
+      if (path.endsWith('/models')) return list
+      if (path.endsWith('/usage')) return { attempts_24h: 0 }
+      if (path.endsWith('/test')) return { reference: question, latest: null }
+      throw new LocalApiError(409, { detail: 'Preferences changed in another tab.' })
+    })
+    render(<GradingPanel request={request as LocalRequest} />)
+    const choice = await screen.findByRole('combobox', { name: 'Grading model' })
+    fireEvent.change(choice, { target: { value: 'other-model' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save model' }))
+    const error = await screen.findByRole('alert')
+    expect(document.activeElement).toBe(error)
+    expect(screen.getByRole('button', { name: 'Save model' })).toHaveProperty('disabled', true)
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh model catalog' }))
+    await screen.findByDisplayValue('Account model')
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 
   it('uses the saved sources in feedback while previewing the next fresh question', async () => {
