@@ -1,5 +1,6 @@
 """Validate rubric-grounded feedback and compute grades locally from criterion weights."""
 
+import json
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal
@@ -42,6 +43,36 @@ class GradingContext(BaseModel):
     critical_misconceptions: dict[str, str]
     sources: dict[str, str]
     objection: str | None = Field(default=None, min_length=1, max_length=1600)
+
+    @classmethod
+    def from_question_snapshot(cls, snapshot: str, answer: str) -> "GradingContext":
+        """Build the grading request shared by practice and fixed evaluation.
+
+        Parameters
+        ----------
+        snapshot : str
+            JSON snapshot of a validated, reviewed bank question.
+        answer : str
+            Exact submitted answer text.
+
+        Returns
+        -------
+        GradingContext
+            Versioned question, rubric, references and answer for the provider.
+        """
+        record = json.loads(snapshot)
+        return cls(
+            version=f"v{record['version']}",
+            question=record["prompt"],
+            answer=answer,
+            reference=record["reference_explanation"],
+            criteria=record["criteria"],
+            critical_misconceptions={
+                f"misconception-{index}": value
+                for index, value in enumerate(record["critical_misconceptions"], start=1)
+            },
+            sources={source["id"]: source["url"] for source in record["sources"]},
+        )
 
     @classmethod
     def connection_test(cls) -> "GradingContext":
