@@ -23,7 +23,7 @@ from .config import (
     MODEL_ID_MAX_LENGTH, MODEL_ID_PATTERN, OVERRIDE_SOURCES, ConfigError, Settings, save_user_settings,
 )
 from .connection import Connection, ConnectionError, ConnectionStatus, SignInStart
-from .database import Database, PreferenceConflict, Preferences
+from .database import BackupError, Database, PreferenceConflict, Preferences
 from .grading import GradingContext
 from .grading_jobs import GradingJobs, RetryConflict
 from .history import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, History, HistoryCursorInvalid, HistoryPage, HistorySection
@@ -262,6 +262,12 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         if request.url.path.startswith("/api/practice/"):
             return _error(503, "Could not access saved practice. Try again.")
         return _error(503, "Could not access local settings. Try again.")
+
+    @app.exception_handler(BackupError)
+    async def backup_error(_request: Request, error: BackupError):
+        """Return a recovery-safe backup failure without exposing filesystem details."""
+        logger.warning("Local backup operation failed: %s", error)
+        return _error(503, str(error))
 
     @app.exception_handler(PreferenceConflict)
     async def settings_conflict(_request: Request, error: PreferenceConflict):
@@ -612,6 +618,21 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         values = {**saved.values, "timezone": edit.timezone}
         result = save_user_settings(settings, values, expected_version=edit.version)
         return settings_payload(result)
+
+    @app.post("/api/backup")
+    def download_backup() -> FileResponse:
+        """Create and download a verified copy of local learning data.
+
+        Credentials are stored outside the SQLite database and are therefore not
+        included in this attachment.
+        """
+        backup = database.create_backup()
+        return FileResponse(
+            backup,
+            media_type="application/vnd.sqlite3",
+            filename="daily-ml-learning-backup.sqlite3",
+            headers={"Cache-Control": "no-store"},
+        )
 
     app.mount("/assets", StaticFiles(directory=assets / "assets"), name="assets")
     return app

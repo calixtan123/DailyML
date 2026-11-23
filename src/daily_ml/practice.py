@@ -1,15 +1,12 @@
 """Select, snapshot and save local practice independently of model access."""
 
 import json
-import os
 import sqlite3
 from collections.abc import Callable, Collection, Sequence
-from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone as utc
 from pathlib import Path
 from random import choice
-from tempfile import mkstemp
 from typing import Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -329,6 +326,7 @@ class Practice:
             initialize_reviews(connection, self.review_intervals)
             initialize_versions(connection)
             initialize_disputes(connection)
+            self.database.record_backup_tables(connection)
 
     def _migrate_practice_credits(self, connection: sqlite3.Connection) -> None:
         """Move legacy credit rows to the item-level foreign key schema.
@@ -340,7 +338,7 @@ class Practice:
         foreign_keys = connection.execute("PRAGMA foreign_key_list(practice_credits)").fetchall()
         if not any(row[2] == "practice_submissions" for row in foreign_keys):
             return
-        self._backup_before_credit_upgrade()
+        self.database.create_backup(prefix="daily-ml-before-gap-upgrade")
         connection.execute("DROP INDEX IF EXISTS practice_credits_by_date")
         connection.execute("ALTER TABLE practice_credits RENAME TO practice_credits_legacy")
         connection.execute(_CREDITS_SCHEMA)
@@ -349,25 +347,6 @@ class Practice:
                SELECT question_id, local_date, item_id FROM practice_credits_legacy"""
         )
         connection.execute("DROP TABLE practice_credits_legacy")
-
-    def _backup_before_credit_upgrade(self) -> None:
-        """Save and verify a private backup while the migration holds the write lock."""
-        fd, filename = mkstemp(
-            prefix="daily-ml-before-gap-upgrade-", suffix=".sqlite3", dir=self.database.path.parent,
-        )
-        os.close(fd)
-        backup = Path(filename)
-        try:
-            # Back up from a separate reader of the committed, pre-upgrade database.
-            with self.database.connect() as source, closing(sqlite3.connect(backup)) as target:
-                source.backup(target)
-                if target.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
-                    raise sqlite3.DatabaseError("Pre-upgrade backup failed its integrity check.")
-                if target.execute("PRAGMA foreign_key_check").fetchone() is not None:
-                    raise sqlite3.DatabaseError("Pre-upgrade backup failed its foreign-key check.")
-        except (OSError, sqlite3.Error):
-            backup.unlink(missing_ok=True)
-            raise
 
     def today(self, timezone: str) -> PracticeToday:
         """Get today's session, saving the recommendation pair if needed.

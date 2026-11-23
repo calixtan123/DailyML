@@ -18,6 +18,7 @@ import uvicorn
 from .app import LaunchError, create_app, resolve_assets
 from .bank import BankError, validate_bank
 from .config import ConfigError, load_settings, resolve_installation
+from .database import BackupError, Database
 from .credentials import StorageError
 from .connection import Connection
 from .database import Database
@@ -160,6 +161,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                           help="Explicitly create linked retries for confirmed evaluation failures")
     validate = commands.add_parser("validate-bank", help="Validate the reviewed question bank offline")
     validate.add_argument("--bank-dir", type=Path, help="Read a candidate curriculum and questions directory")
+    restore = commands.add_parser("restore", help="Restore a verified backup while Daily ML Practice is stopped")
+    restore.add_argument("backup", type=Path, help="SQLite backup downloaded from Settings")
+    restore.add_argument("--config", type=Path, help="Use this installation TOML")
     args = parser.parse_args(argv)
     try:
         if args.command == "evaluate-grader":
@@ -208,6 +212,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             section_count = sum(len(domain.sections) for domain in bank.curriculum.domains)
             print(f"Validated {len(bank.questions)} questions across {section_count} sections.")  # CLI output
             return 0
+        if args.command == "restore":
+            installation = resolve_installation(args.config)
+            Database.validate_backup(args.backup)
+            with own_data_directory(installation.data_dir):
+                pre_restore = Database(installation.data_dir).restore_backup(args.backup)
+            print(f"Restore completed. Pre-restore copy retained at: {pre_restore}")  # CLI output
+            return 0
         assets = resolve_assets()
         installation = resolve_installation(args.config)
         with own_data_directory(installation.data_dir), _logging(installation.data_dir):
@@ -228,7 +239,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     except KeyboardInterrupt:
         return 0
-    except (BankError, ConfigError, LaunchError, StorageError) as error:
+    except (BackupError, BankError, ConfigError, LaunchError, StorageError) as error:
         parser.exit(1, f"Daily ML Practice: {error}\n")
     except (OSError, sqlite3.Error):
         parser.exit(1, "Daily ML Practice: Could not open local data. Check your data directory and permissions.\n")

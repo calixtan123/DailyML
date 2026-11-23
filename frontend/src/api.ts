@@ -1,4 +1,5 @@
 export type LocalRequest = <T>(path: string, options?: RequestInit) => Promise<T>
+export type LocalFileRequest = (path: string, options?: RequestInit) => Promise<Blob>
 
 /** Preserve structured local errors so the draft editor can show a conflicting save. */
 export class LocalApiError extends Error {
@@ -44,4 +45,24 @@ export const request: LocalRequest = async <T>(path: string, options: RequestIni
     return responseData<T>(await send())
   }
   return responseData<T>(response)
+}
+
+/** Download a protected local file while reusing the current CSRF session. */
+export const requestFile: LocalFileRequest = async (path: string, options: RequestInit = {}) => {
+  const send = async () => {
+    const token = await getSession()
+    const headers = new Headers(options.headers)
+    if (options.method && options.method !== 'GET') headers.set('X-CSRF-Token', token)
+    return fetch(path, { ...options, headers, cache: 'no-store', credentials: 'same-origin' })
+  }
+  let response = await send()
+  if (response.status === 403) {
+    session = undefined
+    response = await send()
+  }
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null)
+    throw new LocalApiError(response.status, payload)
+  }
+  return response.blob()
 }

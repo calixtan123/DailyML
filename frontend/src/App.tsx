@@ -1,7 +1,8 @@
 import { BookOpen, History as HistoryIcon, Settings } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Dispatch, MouseEvent, SetStateAction } from 'react'
-import { request } from './api'
+import { request, requestFile } from './api'
+import { BackupSettings } from './BackupSettings'
 import { ConnectionSettings, type GradingAccount } from './ConnectionSettings'
 import { GradingSettings, type GradingAction } from './GradingSettings'
 import { History } from './History'
@@ -57,6 +58,7 @@ function SettingsPage({ retainedAction, setRetainedAction }: {
   return (
     <>
       <h1>Settings</h1>
+      <BackupSettings requestFile={requestFile} />
       <ConnectionSettings request={request} onGradingAccount={updateGradingAccount} />
       <GradingSettings
         key={gradingAccount ?? null}

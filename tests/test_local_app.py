@@ -134,6 +134,18 @@ def test_preference_mutations_are_versioned_and_hide_invalid_payloads(client):
     assert client.get("/api/settings").json()["timezone"] == "UTC"
 
 
+def test_settings_backup_download_requires_local_session_and_returns_sqlite(client):
+    """Settings creates a verified attachment only for the local signed-in browser session."""
+    assert client.post("/api/backup").status_code == 403
+
+    response = client.post("/api/backup", headers=bootstrap(client))
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/vnd.sqlite3")
+    assert "attachment" in response.headers["content-disposition"]
+    assert response.content.startswith(b"SQLite format 3")
+
+
 def test_settings_exposes_override_provenance(tmp_path, assets):
     """Show the effective installed timezone and identify why it cannot be edited."""
     settings = load_settings(environ={"DML_DATA_DIR": str(tmp_path), "DML_TIMEZONE": "Asia/Tokyo"})
