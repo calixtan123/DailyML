@@ -186,7 +186,7 @@ class GradingJobs:
         RetryConflict
             If a retry does not identify recoverable work for this model.
         PreferenceConflict
-            If a new action names a model different from the effective selection.
+            If a new action names a model different from the effective selection or active test.
         """
         with self.database.connect() as db:
             db.row_factory = sqlite3.Row
@@ -210,6 +210,10 @@ class GradingJobs:
                 child = db.execute("SELECT * FROM grading_requests WHERE retry_of=?", (retry_of,)).fetchone()
                 active = child or active
             if active:
+                if active["model_id"] != model_id:
+                    raise PreferenceConflict(
+                        "A connection test for another model is pending. Wait for it to finish and try again."
+                    )
                 request_id = active["id"]
             else:
                 request_id = str(uuid4())
