@@ -15,6 +15,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 SQLITE_WAIT_SECONDS = 3
 BACKUP_SCHEMA_VERSION = 1
+_EVALUATION_CORE_TABLES = {"grader_evaluation_runs", "grader_evaluation_cases"}
+_EVALUATION_TABLES = _EVALUATION_CORE_TABLES | {"grader_evaluation_attempts"}
+_EVALUATION_VERSION_COLUMNS = {"reproducibility_json", "suite_fingerprint"}
 
 # Columns required by each durable table in the currently supported schema.
 # The manifest records installed tables, so unknown additive tables from a
@@ -25,6 +28,9 @@ _REQUIRED_TABLE_COLUMNS = {
     "bank_question_versions": {"question_id", "version", "section_id", "concept_id", "retired", "record_json"},
     "bank_sections": {"id", "domain_id", "title", "position"},
     "concept_review_state": {"concept_id", "stage", "evidence_due_date"},
+    "grader_evaluation_attempts": {"run_id", "case_id", "request_id"},
+    "grader_evaluation_cases": {"run_id", "case_id", "request_id"},
+    "grader_evaluation_runs": {"id", "model_id", "prompt_version", "schema_version", "fixture_version", "started_at"},
     "grading_action_keys": {"action_key", "request_id"},
     "grading_requests": {
         "id", "kind", "model_id", "state", "created_at", "finished_at", "retry_of", "schema_mode",
@@ -79,6 +85,9 @@ _REQUIRED_UNIQUE_KEYS = {
     "bank_sections": (frozenset({"id"}),),
     "bank_question_versions": (frozenset({"question_id", "version"}),),
     "concept_review_state": (frozenset({"concept_id"}),),
+    "grader_evaluation_attempts": (frozenset({"run_id", "case_id", "request_id"}), frozenset({"request_id"})),
+    "grader_evaluation_cases": (frozenset({"run_id", "case_id"}), frozenset({"request_id"})),
+    "grader_evaluation_runs": (frozenset({"id"}),),
     "review_evidence_selection": (frozenset({"original_item_id"}),),
     "model_attempts": (frozenset({"request_id"}),),
     "model_rate_limit_retries": (frozenset({"request_id"}),),
@@ -99,6 +108,14 @@ _REQUIRED_UNIQUE_KEYS = {
 _REQUIRED_FOREIGN_KEYS = {
     "bank_question_versions": (
         (frozenset({("section_id", "id")}), "bank_sections"),
+    ),
+    "grader_evaluation_attempts": (
+        (frozenset({("run_id", "id")}), "grader_evaluation_runs"),
+        (frozenset({("request_id", "id")}), "grading_requests"),
+    ),
+    "grader_evaluation_cases": (
+        (frozenset({("run_id", "id")}), "grader_evaluation_runs"),
+        (frozenset({("request_id", "id")}), "grading_requests"),
     ),
     "practice_items": (
         (frozenset({("local_date", "local_date")}), "practice_days"),
@@ -201,20 +218,41 @@ def _validate_grading_payloads(connection: sqlite3.Connection) -> None:
             raise ValueError("invalid grading usage")
 
 
-def _validate_table_contracts(connection: sqlite3.Connection, recorded_tables: set[str]) -> None:
+def _validate_table_contracts(connection: sqlite3.Connection, tables: set[str]) -> None:
     """Require SQL keys and relationships relied on by supported durable layouts."""
     for table, required_keys in _REQUIRED_UNIQUE_KEYS.items():
-        if table in recorded_tables and not set(required_keys) <= _unique_keys(connection, table):
+        if table in tables and not set(required_keys) <= _unique_keys(connection, table):
             raise ValueError("required unique key is missing")
     for table, requirements in _REQUIRED_FOREIGN_KEYS.items():
-        if table in recorded_tables:
+        if table in tables:
             foreign_keys = _foreign_keys(connection, table)
             if any((referenced_table, columns) not in foreign_keys for columns, referenced_table in requirements):
                 raise ValueError("required foreign key is missing")
-    if "practice_credits" in recorded_tables:
+    if "practice_credits" in tables:
         foreign_keys = frozenset(_foreign_keys(connection, "practice_credits"))
         if foreign_keys not in _PRACTICE_CREDITS_FOREIGN_KEY_LAYOUTS:
             raise ValueError("unsupported practice credit relationship layout")
+
+
+def _evaluation_tables_for_validation(connection: sqlite3.Connection, tables: set[str]) -> set[str]:
+    """Recognize current and legacy evaluator layouts, including unregistered tables."""
+    evaluation_tables = tables & _EVALUATION_TABLES
+    if not evaluation_tables:
+        if "grading_requests" in tables and connection.execute(
+            "SELECT 1 FROM grading_requests WHERE kind = 'evaluation' LIMIT 1"
+        ).fetchone():
+            raise ValueError("evaluation requests are missing their evaluator tables")
+        return set()
+    ledger_tables = {"grading_requests", "model_attempts"}
+    if not (_EVALUATION_CORE_TABLES | ledger_tables) <= tables:
+        raise ValueError("required evaluator tables are missing")
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(grader_evaluation_runs)")}
+    # The version columns were introduced together, after the attempt table.
+    # Opening a restored legacy database in the app can register its old tables.
+    if columns & _EVALUATION_VERSION_COLUMNS:
+        if not (_EVALUATION_TABLES <= evaluation_tables and _EVALUATION_VERSION_COLUMNS <= columns):
+            raise ValueError("current evaluator schema is incomplete")
+    return evaluation_tables | ledger_tables
 
 
 def validate_editable_preferences(values: dict[str, object]) -> None:
@@ -335,12 +373,13 @@ class Database:
             }
             if not required <= recorded_tables or not recorded_tables <= tables:
                 raise ValueError
+            validation_tables = recorded_tables | _evaluation_tables_for_validation(connection, tables)
             for table, required_columns in _REQUIRED_TABLE_COLUMNS.items():
-                if table in recorded_tables:
+                if table in validation_tables:
                     columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
                     if not required_columns <= columns:
                         raise ValueError
-            _validate_table_contracts(connection, recorded_tables)
+            _validate_table_contracts(connection, validation_tables)
             preferences = json.loads(row[1])
             validate_editable_preferences(preferences)
             if "bank_question_versions" in recorded_tables:

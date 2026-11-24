@@ -136,7 +136,7 @@ class EvaluationRunner:
 
     def _initialize(self) -> None:
         """Create evaluation metadata tables additive to the production attempt ledger."""
-        with self.database.connect() as db:
+        with self.database.connect(immediate=True) as db:
             db.execute("""CREATE TABLE IF NOT EXISTS grader_evaluation_runs (
                 id TEXT PRIMARY KEY, model_id TEXT NOT NULL, prompt_version TEXT NOT NULL,
                 schema_version TEXT NOT NULL, fixture_version TEXT NOT NULL, started_at TEXT NOT NULL,
@@ -160,6 +160,7 @@ class EvaluationRunner:
             # an auditable attempt in the production ledger, so retain it during this additive migration.
             db.execute("""INSERT OR IGNORE INTO grader_evaluation_attempts(run_id, case_id, request_id)
                           SELECT run_id, case_id, request_id FROM grader_evaluation_cases""")
+            self.database.record_backup_tables(db)
 
     def _prepare_case_request(
         self, run_id: str, case: EvaluationCase, model_id: str, recover_confirmed_failures: bool,
