@@ -29,6 +29,7 @@ type HistoryDetail = {
     criteria: Rubric[]
     sources: Source[]
     reference_explanation: string
+    hint?: string | null
   }
   draft: { text: string; version: number }
   submission: (SavedSubmission & { disputes?: Dispute[] }) | null
@@ -55,16 +56,25 @@ const STATUS_LABELS: Record<string, string> = {
   not_started: 'Not started',
   unfinished: 'Unfinished draft',
   pending_assessment: 'Awaiting assessment',
+  ready_to_send: 'Grading ready to send',
+  awaiting_access: 'Waiting for grading access',
+  awaiting_allowance: 'Waiting for plan allowance',
+  queued: 'Queued for grading',
+  in_flight: 'Grading in progress',
+  needs_clarification: 'Clarification requested',
+  outcome_unknown: 'Grading outcome unknown',
+  failed_recoverable: 'Grading needs a retry',
   assessed: 'Assessed',
   support_viewed: 'Support viewed',
   self_reported_gap: 'Self-reported gap',
 }
 
-function requestPath(filters: { section: string; start: string; end: string }, cursor?: string) {
+function requestPath(filters: { section: string; start: string; end: string }, cursor?: string, day?: string) {
   const parameters = new URLSearchParams()
   if (filters.section) parameters.set('section_id', filters.section)
   if (filters.start) parameters.set('start_date', filters.start)
   if (filters.end) parameters.set('end_date', filters.end)
+  if (day) parameters.set('activity_date', day)
   if (cursor) parameters.set('cursor', cursor)
   const query = parameters.toString()
   return query ? `/api/history?${query}` : '/api/history'
@@ -99,7 +109,10 @@ function Feedback({ submission }: { submission: SavedSubmission }) {
             </>
           )}
           {answer.request.feedback?.status === 'needs_clarification' && <p>{answer.request.feedback.explanation}</p>}
-          {!answer.request.feedback && <p>{answer.request.message ?? 'Feedback is not available yet.'}</p>}
+          {!answer.request.feedback && (
+            <p>{answer.request.message ?? STATUS_LABELS[answer.request.state] ?? 'Feedback is not available yet.'}</p>
+          )}
+          {answer.request.state === 'awaiting_access' && <a href="#/settings">Open grading settings</a>}
         </details>
       ))}
       {submission.versions.length > 1 && (
@@ -165,7 +178,11 @@ function AssessmentComparison({ assessment }: { assessment: GradingAssessment })
   )
 }
 
-function Detail({ detail, onResume }: { detail: HistoryDetail; onResume: (itemId: string) => void }) {
+function Detail({ detail, onResume, showDraft }: {
+  detail: HistoryDetail
+  onResume: (itemId: string) => void
+  showDraft: boolean
+}) {
   const disputes = detail.submission?.disputes ?? []
   const canInspectMarking = detail.submission !== null
     || detail.support?.reveals.includes('explanation')
@@ -178,9 +195,21 @@ function Detail({ detail, onResume }: { detail: HistoryDetail; onResume: (itemId
       <p>Saved on <time dateTime={detail.local_date}>{detail.local_date}</time></p>
       {detail.submission && <p>Completed on <time dateTime={detail.submission.completed_date}>{detail.submission.completed_date}</time></p>}
       {detail.assessed_at !== null && <p>Assessment saved {new Date(detail.assessed_at * 1000).toLocaleString()}</p>}
-      {detail.review?.awaiting_assessment && <p role="status">Awaiting accepted assessment</p>}
+      {detail.review?.awaiting_assessment && detail.submission?.request.state === 'assessed'
+        && <p role="status">Awaiting accepted assessment</p>}
       {detail.review?.due_date && <p>Current review date <time dateTime={detail.review.due_date}>{detail.review.due_date}</time></p>}
-      {detail.draft.text && <details><summary>Saved draft</summary><p className="practice-original">{detail.draft.text}</p></details>}
+      {detail.draft.text && (
+        <details open={showDraft && !detail.submission}>
+          <summary>Saved draft</summary>
+          <p className="practice-original">{detail.draft.text}</p>
+        </details>
+      )}
+      {detail.question.hint && detail.support?.reveals.includes('hint') && (
+        <section className="practice-support-content" aria-label="Saved hint">
+          <h3>Hint</h3>
+          <p>{detail.question.hint}</p>
+        </section>
+      )}
       {detail.support && (
         <details>
           <summary>Support used</summary>
@@ -208,14 +237,19 @@ function Detail({ detail, onResume }: { detail: HistoryDetail; onResume: (itemId
         </details>
       ) : <p>Resume practice to open the saved marking guide and learning support.</p>}
       <button type="button" onClick={() => onResume(detail.item_id)}>
-        {detail.submission?.request.can_send ? 'Recover saved answer' : 'Resume practice'}
+        {detail.submission?.request.can_send || detail.submission?.revision?.request.can_send
+          ? 'Recover saved answer' : 'Resume practice'}
       </button>
     </article>
   )
 }
 
 /** Browse local learning records and open exact saved evidence or resumable work. */
-export function History({ request, onResume }: { request: LocalRequest; onResume: (itemId: string) => void }) {
+export function History({ request, onResume, day }: {
+  request: LocalRequest
+  onResume: (itemId: string) => void
+  day?: string
+}) {
   const [sections, setSections] = useState<LoadState<Section[]>>({ kind: 'loading' })
   const [filters, setFilters] = useState({ section: '', start: '', end: '' })
   const [applied, setApplied] = useState(filters)
@@ -224,19 +258,21 @@ export function History({ request, onResume }: { request: LocalRequest; onResume
   const [loadingMore, setLoadingMore] = useState(false)
   const [loadMoreError, setLoadMoreError] = useState(false)
   const [pageRetry, setPageRetry] = useState(0)
+  const [selectedItemId, setSelectedItemId] = useState<string>()
   const [detail, setDetail] = useState<LoadState<HistoryDetail> | undefined>()
+  const [detailRevision, setDetailRevision] = useState(0)
   const requestSequence = useRef(0)
-  const detailSequence = useRef(0)
-  const detailController = useRef<AbortController | undefined>(undefined)
+  const itemId = selectedItemId ?? (day && page.kind === 'ready' ? page.value.entries[0]?.item_id : undefined)
 
   useEffect(() => {
+    if (day) return
     const controller = new AbortController()
     request<Section[]>('/api/history/sections', { signal: controller.signal }).then(
       value => { if (!controller.signal.aborted) setSections({ kind: 'ready', value }) },
       () => { if (!controller.signal.aborted) setSections({ kind: 'error' }) },
     )
     return () => controller.abort()
-  }, [request])
+  }, [request, day])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -250,7 +286,7 @@ export function History({ request, onResume }: { request: LocalRequest; onResume
       setLoadingMore(false)
       setLoadMoreError(false)
     }
-    request<HistoryPage>(requestPath(applied, nextCursor), { signal: controller.signal }).then(
+    request<HistoryPage>(requestPath(applied, nextCursor, day), { signal: controller.signal }).then(
       value => {
         if (controller.signal.aborted || sequence !== requestSequence.current) return
         setPage(previous => previous.kind === 'ready' && requestingMore
@@ -269,12 +305,11 @@ export function History({ request, onResume }: { request: LocalRequest; onResume
       },
     )
     return () => controller.abort()
-  }, [request, applied, nextCursor, pageRetry])
+  }, [request, applied, nextCursor, pageRetry, day])
 
   function applyFilters(event: FormEvent) {
     event.preventDefault()
-    detailController.current?.abort()
-    detailSequence.current += 1
+    setSelectedItemId(undefined)
     setDetail(undefined)
     setNextCursor(undefined)
     setApplied({ ...filters })
@@ -288,24 +323,25 @@ export function History({ request, onResume }: { request: LocalRequest; onResume
     setPageRetry(previous => previous + 1)
   }
 
-  async function openDetail(itemId: string) {
-    detailController.current?.abort()
-    const controller = new AbortController()
-    detailController.current = controller
-    const sequence = ++detailSequence.current
-    setDetail({ kind: 'loading' })
-    try {
-      const value = await request<HistoryDetail>(`/api/history/${itemId}`, { signal: controller.signal })
-      if (!controller.signal.aborted && sequence === detailSequence.current) setDetail({ kind: 'ready', value })
-    } catch {
-      if (!controller.signal.aborted && sequence === detailSequence.current) setDetail({ kind: 'error' })
-    }
+  function refreshDetail() {
+    setDetailRevision(previous => previous + 1)
   }
+
+  useEffect(() => {
+    if (!itemId) return
+    const controller = new AbortController()
+    setDetail({ kind: 'loading' })
+    request<HistoryDetail>(`/api/history/${itemId}`, { signal: controller.signal }).then(
+      value => { if (!controller.signal.aborted) setDetail({ kind: 'ready', value }) },
+      () => { if (!controller.signal.aborted) setDetail({ kind: 'error' }) },
+    )
+    return () => controller.abort()
+  }, [request, itemId, detailRevision])
 
   return (
     <div className="history">
-      <h1>History</h1>
-      <form className="panel" onSubmit={applyFilters}>
+      {day ? <h2>Saved practice</h2> : <h1>History</h1>}
+      {!day && <form className="panel" onSubmit={applyFilters}>
         <div>
           <label htmlFor="history-section">Section</label>
           <select id="history-section" value={filters.section} onChange={event => setFilters({ ...filters, section: event.target.value })}>
@@ -323,18 +359,26 @@ export function History({ request, onResume }: { request: LocalRequest; onResume
           <input id="history-end" type="date" value={filters.end} onChange={event => setFilters({ ...filters, end: event.target.value })} />
         </div>
         <button type="submit">Apply filters</button>
-      </form>
+      </form>}
       {page.kind === 'loading' && <p role="status">Loading saved history…</p>}
-      {page.kind === 'error' && <p role="alert">Could not load saved history. Change a filter or try again.</p>}
+      {page.kind === 'error' && (day
+        ? <p role="alert">Could not load saved practice. <button type="button" onClick={retryPageRequest}>Retry</button></p>
+        : <p role="alert">Could not load saved history. Change a filter or try again.</p>)}
       {loadingMore && <p role="status">Loading more saved history…</p>}
       {loadMoreError && <p role="alert">Could not load more saved history. <button type="button" onClick={retryPageRequest}>Retry loading more</button></p>}
       {page.kind === 'ready' && (
-        page.value.entries.length === 0 ? <p className="panel" role="status">No saved learning matches these filters.</p> : (
+        page.value.entries.length === 0 ? <p className="panel" role="status">
+          {day ? 'No saved practice for this day.' : 'No saved learning matches these filters.'}
+        </p> : (
           <section aria-label="Saved learning history">
             <ul>
               {page.value.entries.map(entry => (
                 <li key={entry.item_id}>
-                  <button type="button" onClick={() => void openDetail(entry.item_id)}>{entry.title}</button>
+                  <button type="button" aria-pressed={entry.item_id === itemId}
+                    onClick={() => {
+                      setSelectedItemId(entry.item_id)
+                      if (entry.item_id === itemId) refreshDetail()
+                    }}>{entry.title}</button>
                   <p>{entry.section_title} · <time dateTime={entry.local_date}>{entry.local_date}</time> · {STATUS_LABELS[entry.status] ?? entry.status}</p>
                 </li>
               ))}
@@ -344,8 +388,10 @@ export function History({ request, onResume }: { request: LocalRequest; onResume
         )
       )}
       {detail?.kind === 'loading' && <p role="status">Loading saved learning evidence…</p>}
-      {detail?.kind === 'error' && <p role="alert">Could not load this saved learning record.</p>}
-      {detail?.kind === 'ready' && <Detail detail={detail.value} onResume={onResume} />}
+      {detail?.kind === 'error' && <p role="alert">Could not load this saved learning record.{' '}
+        <button type="button" onClick={refreshDetail}>Retry loading record</button>
+      </p>}
+      {detail?.kind === 'ready' && <Detail detail={detail.value} onResume={onResume} showDraft={!!day} />}
     </div>
   )
 }

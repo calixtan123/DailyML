@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from .database import Database
+from .grading_jobs import practice_grading_status
 from .practice import Practice, PracticeItemNotFound
 from .scheduling import ReviewState, read_reviews
 
@@ -97,6 +98,7 @@ class History:
         section_id: str | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
+        activity_date: str | None = None,
         cursor: str | None = None,
         limit: int = DEFAULT_PAGE_SIZE,
     ) -> HistoryPage:
@@ -110,6 +112,8 @@ class History:
             Inclusive ISO practice-date lower bound.
         end_date : str or None
             Inclusive ISO practice-date upper bound.
+        activity_date : str or None
+            Match the saved practice date, latest draft date, or completion date.
         cursor : str or None
             Opaque continuation returned by a previous call with these filters.
         limit : int
@@ -127,6 +131,7 @@ class History:
         """
         start = self._validate_date(start_date)
         end = self._validate_date(end_date)
+        activity = self._validate_date(activity_date)
         if start is not None and end is not None and start > end:
             raise HistoryCursorInvalid("History start date must be on or before its end date.")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_PAGE_SIZE:
@@ -144,6 +149,12 @@ class History:
         if end is not None:
             predicates.append("item.local_date <= :end_date")
             parameters["end_date"] = end.isoformat()
+        if activity is not None:
+            predicates.append("""(item.local_date = :activity_date
+                                  OR item.last_practised_date = :activity_date
+                                  OR submission.completed_date = :activity_date
+                                  OR gap.completed_date = :activity_date)""")
+            parameters["activity_date"] = activity.isoformat()
         if marker is not None:
             predicates.append("(item.created_at < :cursor_time OR (item.created_at = :cursor_time AND item.id < :cursor_id))")
             parameters.update(cursor_time=marker[0], cursor_id=marker[1])
@@ -153,11 +164,10 @@ class History:
                 SELECT item.id, item.local_date, item.created_at, item.section_id, item.section_title,
                        item.question_id, json_extract(item.snapshot_json, '$.title'),
                        CASE WHEN gap.item_id IS NOT NULL THEN 'self_reported_gap'
-                            WHEN request.state = 'assessed' THEN 'assessed'
-                            WHEN submission.item_id IS NOT NULL THEN 'pending_assessment'
+                            WHEN submission.item_id IS NOT NULL THEN request.state
                             WHEN {_HAS_DRAFT} THEN 'unfinished'
                             ELSE 'support_viewed' END,
-                       COALESCE(gap.completed_date, submission.completed_date)
+                       COALESCE(gap.completed_date, submission.completed_date), request.error
                 {_SAVED_ITEMS}
                 LEFT JOIN practice_revisions AS revision ON revision.item_id = item.id
                 LEFT JOIN grading_requests AS request
@@ -167,7 +177,10 @@ class History:
                 LIMIT :limit
             """, parameters).fetchall()
         has_next = len(rows) > limit
-        entries = tuple(HistoryEntry(*row) for row in rows[:limit])
+        entries = tuple(
+            HistoryEntry(*fields, practice_grading_status(status or "pending_assessment", error), completed_date)
+            for *fields, status, completed_date, error in rows[:limit]
+        )
         next_cursor = self._encode_cursor(entries[-1]) if has_next else None
         return HistoryPage(entries, next_cursor)
 

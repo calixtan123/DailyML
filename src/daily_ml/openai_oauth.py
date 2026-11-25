@@ -5,6 +5,7 @@ import logging
 import subprocess
 import sys
 import time
+from pathlib import Path
 from threading import Event
 from typing import Annotated
 
@@ -27,7 +28,10 @@ HTTP_TIMEOUT = 4
 PROVIDER_POLL_SECONDS = 0.05
 _PROVIDER_COMMAND = (
     sys.executable, "-I", "-c",
+    # Use the same package as the launcher even when an editable-install .pth is hidden.
+    "import sys; sys.path.insert(0, sys.argv[1]); "
     "from daily_ml.openai_oauth import _serve_provider_request; _serve_provider_request()",
+    str(Path(__file__).resolve().parents[1]),
 )
 TERMINAL_REFRESH = {
     "invalid_grant", "invalid_refresh_token", "token_expired", "refresh_token_expired",

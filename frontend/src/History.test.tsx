@@ -13,6 +13,7 @@ function detail(itemId = 'saved-1') {
     local_date: '2026-11-17',
     question: {
       id: 'generalisation', version: 2, title: 'Generalisation', prompt: 'How should we test a model?',
+      hint: 'Think about unseen examples.',
       objective: 'Explain generalisation.', section_title: 'Fundamentals', concept_id: 'generalisation',
       criteria: [{ id: 'r1', description: 'Mentions held-out data', weight: 1 }],
       sources: [{ id: 's1', title: 'Source note', url: 'https://example.test/source' }], reference_explanation: 'Use a held-out set.',
@@ -52,6 +53,41 @@ function mockRequest(handler?: (path: string) => unknown) {
 afterEach(cleanup)
 
 describe('History', () => {
+  it('opens the first saved question on the selected calendar day with its viewed hint and assessment', async () => {
+    const { request, spy } = mockRequest()
+    render(<History day="2026-11-17" request={request} onResume={vi.fn()} />)
+    expect(await screen.findByText('Think about unseen examples.')).toBeTruthy()
+    expect(screen.getAllByText('Original saved answer').length).toBeGreaterThan(0)
+    expect(screen.getByText('Good reasoning')).toBeTruthy()
+    expect(screen.getAllByText('Grade 2 of 3').length).toBeGreaterThan(0)
+    expect(spy).toHaveBeenCalledWith('/api/history?activity_date=2026-11-17', expect.anything())
+    expect(screen.queryByLabelText('From date')).toBeNull()
+  })
+
+  it.each([undefined, '2026-11-17'])('retries and refreshes a selected record (calendar day %s)', async day => {
+    let reads = 0
+    const { request } = mockRequest(path => {
+      if (path === '/api/history/sections') return []
+      if (path === '/api/history/saved-1') {
+        reads += 1
+        if (reads === 1) throw new Error('Temporary load failure')
+        const saved = detail()
+        saved.submission.request.feedback.summary = reads === 2 ? 'Initial feedback' : 'Updated feedback'
+        return saved
+      }
+      return { entries, next_cursor: null }
+    })
+    render(<History day={day} request={request} onResume={vi.fn()} />)
+    const entry = await screen.findByRole('button', { name: 'Generalisation' })
+    if (!day) fireEvent.click(entry)
+    const retry = await screen.findByRole('button', { name: 'Retry loading record' })
+    fireEvent.click(day ? entry : retry)
+    expect(await screen.findByText('Initial feedback')).toBeTruthy()
+    fireEvent.click(entry)
+    expect(await screen.findByText('Updated feedback')).toBeTruthy()
+    expect(reads).toBe(3)
+  })
+
   it('loads saved history with labelled filters and submits the selected query', async () => {
     const { request, spy } = mockRequest()
     render(<History request={request} onResume={vi.fn()} />)

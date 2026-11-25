@@ -531,6 +531,29 @@ describe('Today practice editor', () => {
     expect(within(calendar).getByLabelText(/Thursday, 19 November 2026, 0 completed, No practice/)).toBeTruthy()
   })
 
+  it('saves the current draft before browsing previous calendar weeks and returning to today', async () => {
+    const { today, fetch } = practiceApi(undefined, undefined, path => {
+      if (path === '/api/history?activity_date=2026-11-15' || path === '/api/history?activity_date=2026-11-14') {
+        return Response.json({ entries: [], next_cursor: null })
+      }
+      throw new Error(`Unexpected path ${path}`)
+    })
+    today.first_use_date = '2026-11-14'
+    today.completion_counts['2026-11-14'] = 1
+    render(<App />)
+
+    const editor = await screen.findByRole('textbox', { name: 'Your answer' })
+    fireEvent.change(editor, { target: { value: 'Keep this draft.' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Previous week' }))
+    await screen.findByText('No saved practice for this day.')
+    expect(today.selections[0].item.draft.text).toBe('Keep this draft.')
+    expect(screen.queryByRole('textbox', { name: 'Your answer' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /Saturday, 14 November 2026, 1 completed, Partial/ }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith('/api/history?activity_date=2026-11-14', expect.anything()))
+    fireEvent.click(screen.getByRole('button', { name: 'Back to today' }))
+    expect(await screen.findByRole('textbox', { name: 'Your answer' })).toHaveProperty('value', 'Keep this draft.')
+  })
+
   it('credits a saved submission before grading and keeps the other question usable', async () => {
     const original = 'An original answer with a useful example.'
     const submission = {

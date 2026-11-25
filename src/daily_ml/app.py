@@ -467,11 +467,13 @@ def create_app(settings: Settings, *, port: int, assets_dir: Path | None = None)
         section_id: str | None = Query(None, pattern=ID_PATTERN, max_length=64),
         start_date: str | None = Query(None, max_length=10),
         end_date: str | None = Query(None, max_length=10),
+        activity_date: str | None = Query(None, max_length=10),
         cursor: str | None = Query(None, max_length=512),
         limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     ) -> HistoryPage:
         """Read one local history page using the saved section and date filters."""
-        return history.list(section_id=section_id, start_date=start_date, end_date=end_date, cursor=cursor, limit=limit)
+        return history.list(section_id=section_id, start_date=start_date, end_date=end_date,
+                            activity_date=activity_date, cursor=cursor, limit=limit)
 
     @app.get("/api/history/sections")
     def history_sections() -> tuple[HistorySection, ...]:

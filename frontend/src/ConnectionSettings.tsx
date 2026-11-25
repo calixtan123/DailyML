@@ -34,9 +34,10 @@ const STATUS_POLL_MS = 15_000
 const LAUNCH_PATH = /^\/api\/connection\/authorize\/[A-Za-z0-9_-]+$/
 
 /** Show and manage the ChatGPT connection, and report the verified grading account. */
-export function ConnectionSettings({ request, onGradingAccount }: {
+export function ConnectionSettings({ request, onGradingAccount, onConnectionRestored }: {
   request: LocalRequest
   onGradingAccount?: (account: GradingAccount) => void
+  onConnectionRestored?: () => void
 }) {
   const [lastStatus, setLastStatus] = useState<Status>()
   const [busy, setBusy] = useState(false)
@@ -76,6 +77,9 @@ export function ConnectionSettings({ request, onGradingAccount }: {
         setLastStatus(next)
         setStatusError(undefined)
         if (next.state !== 'signing_in') setLaunchPath('')
+        if (phase === 'signing_in' && next.state === 'connected' && next.access_token_usable) {
+          onConnectionRestored?.()
+        }
       } catch (failure) {
         if (!controller.signal.aborted) {
           const detail = failure instanceof Error ? failure.message : ''
@@ -100,7 +104,7 @@ export function ConnectionSettings({ request, onGradingAccount }: {
       window.removeEventListener('focus', refresh)
       document.removeEventListener('visibilitychange', refresh)
     }
-  }, [request, busy, phase])
+  }, [request, busy, phase, onConnectionRestored])
 
   async function signIn() {
     const popup = window.open('about:blank', '_blank')
@@ -152,6 +156,7 @@ export function ConnectionSettings({ request, onGradingAccount }: {
 
   const signingIn = status?.state === 'signing_in'
   const hasAccount = status?.email || status?.plan_authorized
+  const shouldReconnect = status && (status.reauthorization_required || (status.plan_authorized && !status.access_token_usable))
   const error = statusError ?? actionError
   return (
     <section className="panel" aria-labelledby="chatgpt-heading">
@@ -180,10 +185,10 @@ export function ConnectionSettings({ request, onGradingAccount }: {
             </>
           ) : (
             <>
-              {status && (!status.plan_authorized || status.reauthorization_required) && (
+              {status && (!status.plan_authorized || shouldReconnect) && (
                 <button className="chatgpt-button" data-oai-siwc-button="" disabled={busy} onClick={() => void signIn()}>
                   {status.requires_consent ? 'Enable ChatGPT plan use' :
-                    status.reauthorization_required ? 'Reconnect ChatGPT' : 'Continue with ChatGPT'}
+                    shouldReconnect ? 'Reconnect ChatGPT' : 'Continue with ChatGPT'}
                 </button>
               )}
               {hasAccount && <button disabled={busy} onClick={() => void finish('sign-out')}>Sign out</button>}

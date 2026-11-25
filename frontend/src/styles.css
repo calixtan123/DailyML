@@ -121,6 +121,8 @@ input { background: var(--input); min-width: 0; width: 180px; }
 .today-date svg, .today-metadata { color: var(--accent); }
 .today-date time { font-weight: 650; }
 .today-date .muted { margin-left: auto; }
+.calendar-navigation { display: flex; gap: 4px; }
+.calendar-navigation button { padding-inline: 10px; }
 .practice-week {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
@@ -129,8 +131,9 @@ input { background: var(--input); min-width: 0; width: 180px; }
   margin: 12px 0 0;
   list-style: none;
 }
-.practice-week time {
+.practice-week button {
   display: grid;
+  width: 100%;
   justify-items: center;
   gap: 2px;
   border: 1px solid var(--line);
@@ -138,8 +141,10 @@ input { background: var(--input); min-width: 0; width: 180px; }
   padding: 4px 2px;
   color: var(--muted);
   font-size: 12px;
+  line-height: 1.25;
 }
-.practice-week time[aria-current] { border-color: var(--accent); }
+.practice-week button[aria-current] { border-color: var(--accent); }
+.practice-week button[aria-pressed="true"] { background: var(--question); border-color: var(--accent); color: var(--ink); }
 .practice-week [data-completion="Partial"] strong { color: var(--warning); }
 .practice-week [data-completion="Goal met"] strong { color: var(--accent); }
 .practice-legend {

@@ -1589,8 +1589,8 @@ class Practice:
         week_start = calendar_date - timedelta(days=calendar_date.weekday())
         counts = dict(connection.execute(
             """SELECT local_date, COUNT(*) FROM practice_credits
-               WHERE local_date BETWEEN ? AND ? GROUP BY local_date""",
-            (week_start.isoformat(), local_date),
+               WHERE local_date <= ? GROUP BY local_date""",
+            (local_date,),
         ))
         first_use_date, = connection.execute("SELECT MIN(local_date) FROM practice_days").fetchone()
         # Every saved submission can be reopened from Today across practice days.

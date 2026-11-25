@@ -277,6 +277,7 @@ test('History is available before sign-in and resumes the exact saved draft with
   async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     const beforeMidnight = '2026-03-29T22:58:00+00:00'
+    const afterMidnight = '2026-03-29T23:01:00+00:00'
     const root = await mkdtemp(join(tmpdir(), 'daily-ml history '))
     const clockFile = join(root, 'clock')
     const gate = join(root, 'release-offline-grading')
@@ -337,6 +338,13 @@ test('History is available before sign-in and resumes the exact saved draft with
       await expect(page).toHaveURL(new RegExp(`${origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/#/today/[a-f0-9-]{36}$`))
       await expect(page.locator('#practice-question-title')).toHaveText(title)
       await expect(page.getByRole('textbox', { name: 'Your answer' })).toHaveValue(draft)
+
+      await writeFile(clockFile, afterMidnight)
+      await page.clock.setSystemTime(new Date(afterMidnight))
+      await page.goto(origin)
+      await page.getByRole('button', { name: 'Previous week' }).click()
+      await expect(page.getByRole('article', { name: title, exact: true })
+        .getByText(draft, { exact: true })).toBeVisible()
     } finally {
       await writeFile(gate, 'cleanup')
       if (child.pid && child.exitCode === null && child.signalCode === null) {
