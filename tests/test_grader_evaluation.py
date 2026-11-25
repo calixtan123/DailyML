@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from importlib import metadata
 from types import SimpleNamespace
 
@@ -11,7 +13,7 @@ import pytest
 from daily_ml import cli
 from daily_ml.bank import import_bank, validate_bank
 from daily_ml.config import load_settings
-from daily_ml.database import Database
+from daily_ml.database import BackupError, Database
 from daily_ml.grader_evaluation import EvaluationRunner, _context, load_fixed_cases
 from daily_ml.grading import Assessment, CriterionAssessment, FeedbackEnvelope
 from daily_ml.practice import Practice
@@ -420,9 +422,10 @@ def test_runner_does_not_replay_an_unknown_outcome_on_later_invocation(tmp_path)
     first = asyncio.run(runner.run("offline-model", cases=cases))
     runner.jobs.provider = OfflineProvider()
     second = asyncio.run(runner.run("offline-model", cases=cases))
+    explicit_recovery = asyncio.run(runner.run("offline-model", cases=cases, recover_confirmed_failures=True))
 
-    assert first.paused_state == second.paused_state == "outcome_unknown"
-    assert first.usage_count == second.usage_count == 1
+    assert first.paused_state == second.paused_state == explicit_recovery.paused_state == "outcome_unknown"
+    assert first.usage_count == second.usage_count == explicit_recovery.usage_count == 1
 
 
 def test_runner_resumes_post_send_allowance_with_a_linked_attempt_and_counts_both_sends(tmp_path):
@@ -485,28 +488,108 @@ def test_concurrent_direct_resumes_create_one_linked_recovery_attempt(tmp_path):
     assert final.usage_count == 2
 
 
-def test_evaluation_history_survives_sqlite_backup_and_restored_resume(tmp_path):
+@pytest.mark.parametrize("manifested", [True, False], ids=["registered", "unregistered"])
+def test_evaluation_history_survives_sqlite_backup_and_restored_resume(tmp_path, manifested):
     """A restored database keeps case lineage and safely resumes a proven-unsent pause."""
     live = Database(tmp_path / "live")
     settings = load_settings(environ={"DML_DATA_DIR": str(tmp_path / "live")})
     cases = load_fixed_cases()[:2]
-    partial_runner = EvaluationRunner(live, FirstCaseThenAccessProvider(), settings)
+    partial_runner = EvaluationRunner(live, AllowanceAfterSendProvider(), settings)
 
+    asyncio.run(partial_runner.run("offline-model", cases=cases))
+    partial_runner.jobs.provider = FirstCaseThenAccessProvider()
     partial = asyncio.run(partial_runner.run("offline-model", cases=cases))
-    backup = Database(tmp_path / "backup")
+    backup = live.create_backup()
+    with closing(sqlite3.connect(backup)) as connection, connection:
+        tables = {row[0] for row in connection.execute("SELECT table_name FROM daily_ml_backup_tables")}
+        assert {"grader_evaluation_runs", "grader_evaluation_cases", "grader_evaluation_attempts"} <= tables
+        if not manifested:
+            connection.execute("DELETE FROM daily_ml_backup_tables WHERE table_name LIKE 'grader_evaluation_%'")
     restored = Database(tmp_path / "restored")
-    with live.connect() as source, backup.connect() as destination:
-        source.backup(destination)
-    with backup.connect() as source, restored.connect() as destination:
-        source.backup(destination)
+    restored.restore_backup(backup)
 
     restored_runner = EvaluationRunner(restored, OfflineProvider(), settings)
     resumed = asyncio.run(restored_runner.run("offline-model", cases=cases))
     report = restored_runner.report(resumed.run_id, cases=cases)
 
     assert partial.paused_state == "awaiting_access"
-    assert resumed.completed_count == resumed.usage_count == 2
-    assert [case["attempt_count"] for case in report["cases"]] == [1, 1]
+    assert partial.usage_count == 2
+    assert resumed.run_id == partial.run_id
+    assert resumed.completed_count == 2
+    assert resumed.usage_count == 3
+    assert [case["attempt_count"] for case in report["cases"]] == [2, 1]
+
+
+@pytest.mark.parametrize("manifested", [True, False], ids=["registered", "unregistered"])
+@pytest.mark.parametrize("damage", ["missing_attempts", "missing_fingerprint", "missing_key"])
+def test_restore_rejects_incomplete_evaluation_backups(tmp_path, manifested, damage):
+    """Fail before replacing saved preferences if evaluation evidence would be lost."""
+    source = Database(tmp_path / "source")
+    settings = load_settings(environ={"DML_DATA_DIR": str(source.path.parent)})
+    cases = load_fixed_cases()[:1]
+    runner = EvaluationRunner(source, AllowanceAfterSendProvider(), settings)
+    asyncio.run(runner.run("offline-model", cases=cases))
+    runner.jobs.provider = OfflineProvider()
+    completed = asyncio.run(runner.run("offline-model", cases=cases))
+    assert completed.completed_count == 1 and completed.usage_count == 2
+    backup = source.create_backup()
+    with closing(sqlite3.connect(backup)) as connection, connection:
+        if not manifested:
+            connection.execute("DELETE FROM daily_ml_backup_tables WHERE table_name LIKE 'grader_evaluation_%'")
+        if damage == "missing_attempts":
+            connection.execute("DROP TABLE grader_evaluation_attempts")
+        elif damage == "missing_fingerprint":
+            connection.execute("ALTER TABLE grader_evaluation_runs DROP COLUMN suite_fingerprint")
+        else:
+            schema = connection.execute("""SELECT sql FROM sqlite_schema
+                                           WHERE name='grader_evaluation_cases'""").fetchone()[0]
+            rows = connection.execute("SELECT * FROM grader_evaluation_cases").fetchall()
+            connection.execute("DROP TABLE grader_evaluation_cases")
+            connection.execute(schema.replace("NOT NULL UNIQUE REFERENCES", "NOT NULL REFERENCES"))
+            connection.executemany("INSERT INTO grader_evaluation_cases VALUES (?, ?, ?)", rows)
+
+    target = Database(tmp_path / "target")
+    target.save_preferences({"timezone": "Asia/Tokyo"}, expected_version=0)
+    with pytest.raises(BackupError):
+        target.restore_backup(backup)
+    assert target.get_preferences().values == {"timezone": "Asia/Tokyo"}
+
+
+@pytest.mark.parametrize("had_attempt_history", [True, False])
+@pytest.mark.parametrize("manifested", [True, False], ids=["registered", "unregistered"])
+def test_restore_preserves_records_from_pre_fingerprint_evaluator(tmp_path, had_attempt_history, manifested):
+    """Upgrade both older layouts without discarding the current request for a saved case."""
+    source = Database(tmp_path / "source")
+    settings = load_settings(environ={"DML_DATA_DIR": str(source.path.parent)})
+    cases = load_fixed_cases()[:1]
+    runner = EvaluationRunner(source, OfflineProvider(), settings)
+    if had_attempt_history:
+        runner.jobs.provider = AllowanceAfterSendProvider()
+        asyncio.run(runner.run("offline-model", cases=cases))
+        runner.jobs.provider = OfflineProvider()
+    result = asyncio.run(runner.run("offline-model", cases=cases))
+    assert result.usage_count == (2 if had_attempt_history else 1)
+    backup = source.create_backup()
+    with closing(sqlite3.connect(backup)) as connection, connection:
+        saved_case = connection.execute("SELECT * FROM grader_evaluation_cases").fetchone()
+        saved_attempts = set(connection.execute("SELECT * FROM grader_evaluation_attempts"))
+        connection.execute("DELETE FROM daily_ml_backup_tables WHERE table_name LIKE 'grader_evaluation_%'")
+        connection.execute("ALTER TABLE grader_evaluation_runs DROP COLUMN suite_fingerprint")
+        connection.execute("ALTER TABLE grader_evaluation_runs DROP COLUMN reproducibility_json")
+        if not had_attempt_history:
+            connection.execute("DROP TABLE grader_evaluation_attempts")
+        if manifested:
+            Database.record_backup_tables(connection)
+
+    restored = Database(tmp_path / "restored")
+    restored.restore_backup(backup)
+    EvaluationRunner(restored, OfflineProvider(), settings)
+
+    with restored.connect() as connection:
+        assert connection.execute("SELECT id FROM grader_evaluation_runs").fetchall() == [(result.run_id,)]
+        assert connection.execute("SELECT * FROM grader_evaluation_cases").fetchall() == [saved_case]
+        assert set(connection.execute("SELECT * FROM grader_evaluation_attempts")) == saved_attempts
+    Database.validate_backup(restored.create_backup())
 
 
 def test_startup_recovers_an_unreserved_evaluation_claim_before_running_later_cases(tmp_path):
