@@ -260,6 +260,7 @@ export function History({ request, onResume, day }: {
   const [pageRetry, setPageRetry] = useState(0)
   const [selectedItemId, setSelectedItemId] = useState<string>()
   const [detail, setDetail] = useState<LoadState<HistoryDetail> | undefined>()
+  const [detailRevision, setDetailRevision] = useState(0)
   const requestSequence = useRef(0)
   const itemId = selectedItemId ?? (day && page.kind === 'ready' ? page.value.entries[0]?.item_id : undefined)
 
@@ -322,6 +323,10 @@ export function History({ request, onResume, day }: {
     setPageRetry(previous => previous + 1)
   }
 
+  function refreshDetail() {
+    setDetailRevision(previous => previous + 1)
+  }
+
   useEffect(() => {
     if (!itemId) return
     const controller = new AbortController()
@@ -331,7 +336,7 @@ export function History({ request, onResume, day }: {
       () => { if (!controller.signal.aborted) setDetail({ kind: 'error' }) },
     )
     return () => controller.abort()
-  }, [request, itemId])
+  }, [request, itemId, detailRevision])
 
   return (
     <div className="history">
@@ -370,7 +375,10 @@ export function History({ request, onResume, day }: {
               {page.value.entries.map(entry => (
                 <li key={entry.item_id}>
                   <button type="button" aria-pressed={entry.item_id === itemId}
-                    onClick={() => setSelectedItemId(entry.item_id)}>{entry.title}</button>
+                    onClick={() => {
+                      setSelectedItemId(entry.item_id)
+                      if (entry.item_id === itemId) refreshDetail()
+                    }}>{entry.title}</button>
                   <p>{entry.section_title} · <time dateTime={entry.local_date}>{entry.local_date}</time> · {STATUS_LABELS[entry.status] ?? entry.status}</p>
                 </li>
               ))}
@@ -380,7 +388,9 @@ export function History({ request, onResume, day }: {
         )
       )}
       {detail?.kind === 'loading' && <p role="status">Loading saved learning evidence…</p>}
-      {detail?.kind === 'error' && <p role="alert">Could not load this saved learning record.</p>}
+      {detail?.kind === 'error' && <p role="alert">Could not load this saved learning record.{' '}
+        <button type="button" onClick={refreshDetail}>Retry loading record</button>
+      </p>}
       {detail?.kind === 'ready' && <Detail detail={detail.value} onResume={onResume} showDraft={!!day} />}
     </div>
   )
