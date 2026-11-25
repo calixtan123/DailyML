@@ -92,6 +92,40 @@ def test_old_connection_action_recovers_after_new_installation_override(tmp_path
         assert browser.get("/api/usage").json() == {"attempts_24h": 1}
 
 
+def test_connection_test_for_new_model_conflicts_until_previous_test_finishes(client, monkeypatch):
+    """A stale active test cannot consume the action key for another model."""
+    headers = bootstrap(client)
+    jobs = client.app.state.grading
+    sends = []
+    monkeypatch.setattr(client.app.state.connection, "get_access_token", lambda: "offline-token")
+
+    def handle(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json=catalog())
+        sends.append(json.loads(request.content)["model"])
+        return response_stream(terminal())
+
+    jobs.provider.transport = httpx.MockTransport(handle)
+    assert client.put("/api/connection/model", headers=headers, json={"model_id": "z", "version": 0}).status_code == 200
+    original = jobs.enqueue_connection_test("original-action", "z")
+    assert jobs.enqueue_connection_test("same-model-action", "z")["id"] == original["id"]
+    assert client.put("/api/connection/model", headers=headers, json={"model_id": "a", "version": 1}).status_code == 200
+    new_action = {"model_id": "a", "idempotency_key": "new-action"}
+
+    conflict = client.post("/api/connection/test", headers=headers, json=new_action)
+
+    assert conflict.status_code == 409
+    assert sends == []
+    replay = client.post("/api/connection/test", headers=headers, json={
+        "model_id": "z", "idempotency_key": "original-action",
+    })
+    assert replay.status_code == 202 and replay.json()["id"] == original["id"]
+    retried = client.post("/api/connection/test", headers=headers, json=new_action)
+    assert retried.status_code == 202 and retried.json()["model_id"] == "a"
+    assert retried.json()["id"] != original["id"]
+    assert sends == ["z", "a"]
+
+
 def test_new_preferences_apply_without_rewriting_existing_practice_and_attempts(learner, monkeypatch, caplog):
     """Keep the first snapshot and include practice, retry and connection sends in one UTC count."""
     client, headers, database, instants = learner
