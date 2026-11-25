@@ -50,7 +50,8 @@ describe('ChatGPT connection controls', () => {
     const replace = vi.fn()
     vi.spyOn(window, 'open').mockReturnValue({ location: { replace } } as unknown as Window)
     const api = mockApi()
-    render(<ConnectionSettings request={api.request} />)
+    const onConnectionRestored = vi.fn()
+    render(<ConnectionSettings request={api.request} onConnectionRestored={onConnectionRestored} />)
     await screen.findByText('Signed out')
     fireEvent.click(screen.getByRole('button', { name: 'Continue with ChatGPT' }))
     await screen.findByText('Signing in')
@@ -58,6 +59,7 @@ describe('ChatGPT connection controls', () => {
     api.changeStatus(connected)
     await screen.findByText('Connected')
     expect(screen.getByText('learner@example.test')).toBeTruthy()
+    expect(onConnectionRestored).toHaveBeenCalledTimes(1)
     expect(api.spy).toHaveBeenCalledWith('/api/connection/sign-in', { method: 'POST' })
   })
 
@@ -107,7 +109,7 @@ describe('ChatGPT connection controls', () => {
       .toBe('https://chatgpt.com/settings/usage')
   })
 
-  it('shows access expiry with saved plan permission and no browser reauthorization', async () => {
+  it('offers reconnection when access expires while keeping saved plan permission visible', async () => {
     vi.useFakeTimers()
     try {
       const api = mockApi(connected)
@@ -119,6 +121,7 @@ describe('ChatGPT connection controls', () => {
       expect(screen.getByText('Access renewal needed')).toBeTruthy()
       expect(screen.getByText('ChatGPT plan permission saved')).toBeTruthy()
       expect(screen.queryByRole('button', { name: 'Continue with ChatGPT' })).toBeNull()
+      expect(screen.getByRole('button', { name: 'Reconnect ChatGPT' })).toBeTruthy()
       expect(screen.queryByText('ChatGPT plan use authorized')).toBeNull()
       api.changeStatus(connected)
       await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })

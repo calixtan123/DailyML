@@ -18,7 +18,7 @@ type Feedback = {
   critical_misconception_ids: string[]
 } | { status: 'needs_clarification'; explanation: string }
 type Job = { id: string; model_id: string; state: string; grade: number | null; error: string | null; reference: Reference
-  message: string | null; feedback: Feedback | null }
+  message: string | null; feedback: Feedback | null; finished_at?: number | null }
 /** Request body retained until the server acknowledges a test submission. */
 export type GradingAction = { model_id: string; idempotency_key: string; retry_of?: string }
 const TEST = '/api/connection/test'
@@ -33,8 +33,12 @@ function Result({ job }: { job: Job }) {
   if (feedback.status === 'needs_clarification') {
     return <p role="status">Clarification requested by {job.model_id}. {feedback.explanation}</p>
   }
+  const finishedAt = job.finished_at == null ? undefined : new Date(job.finished_at * 1_000)
   return <div className="grading-result">
-    <h3>AI-generated feedback</h3>
+    <h3>Last completed connection test</h3>
+    {finishedAt && <p className="muted">Tested on <time dateTime={finishedAt.toISOString()}>
+      {finishedAt.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })}
+    </time></p>}
     <p role="status"><strong>Grade {job.grade} of 3</strong> · {job.model_id}</p>
     <p>{feedback.summary}</p>
     {feedback.corrections.length > 0 && <ul>{feedback.corrections.map((item, i) => <li key={i}>{item}</li>)}</ul>}
@@ -58,13 +62,14 @@ function Result({ job }: { job: Job }) {
 
 /** Run the grading connection test and display the saved result. */
 export function GradingSettings({ request, connected, uncertainAction, onUncertainActionChange,
-  latestPreferences, onPreferencesChange }: {
+  latestPreferences, onPreferencesChange, connectionRevision }: {
   request: LocalRequest
   connected: boolean
   uncertainAction: GradingAction | undefined
   onUncertainActionChange: (action: GradingAction | undefined) => void
   latestPreferences?: Preferences
   onPreferencesChange?: (settings: Preferences) => void
+  connectionRevision?: number
 }) {
   const [catalog, setCatalog] = useState<Catalog>()
   const [reference, setReference] = useState<Reference>()
@@ -127,6 +132,7 @@ export function GradingSettings({ request, connected, uncertainAction, onUncerta
     void request<Catalog>(MODELS, { signal: controller.signal }).then(reply => {
       if (controller.signal.aborted) return
       setCatalog(reply)
+      setCatalogError('')
       if (reply.settings) onPreferencesChange?.(reply.settings)
       setCatalogStale(false)
       setDraft(undefined)
@@ -138,7 +144,7 @@ export function GradingSettings({ request, connected, uncertainAction, onUncerta
       if (!controller.signal.aborted) setCatalogLoading(false)
     })
     return () => controller.abort()
-  }, [request, connected, catalogRevision, onPreferencesChange])
+  }, [request, connected, catalogRevision, connectionRevision, onPreferencesChange])
 
   useEffect(() => {
     const controller = new AbortController()

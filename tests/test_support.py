@@ -229,6 +229,7 @@ def test_today_hides_prior_week_gap_but_keeps_unresolved_grading(database):
 
     assert {item.id for item in sunday_today.submitted} == {gap.id, pending.id}
     assert {item.id for item in monday_today.submitted} == {pending.id}
+    assert monday_today.completion_counts == {"2026-11-21": 2}
     assert practice.submission(gap.id)["request"]["state"] == "self_reported_gap"
 
 

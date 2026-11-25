@@ -88,6 +88,28 @@ def test_history_lists_sections_from_saved_practice_items(database):
     }
 
 
+def test_calendar_finds_an_older_question_by_its_completion_date(database):
+    """A resumed answer appears on the day that earned calendar credit."""
+    monday = Practice(database, answer_limit=8000, clock=lambda: MONDAY, choose=Random(4).choice)
+    item = monday.today(LONDON).selections[0].item
+    monday.view_help(item.id, "hint")
+    later = datetime(2026, 11, 24, 12, tzinfo=timezone.utc)
+    tuesday = Practice(database, answer_limit=8000, clock=lambda: later)
+    tuesday.submit(item.id, "Saved on a later date.", expected_version=0,
+                   resolve_settings=lambda _connection: (LONDON, "gpt-test"))
+    with database.connect() as connection:
+        connection.execute("UPDATE grading_requests SET error='unsent' WHERE kind='practice'")
+
+    history = History(database)
+    entry, = history.list(activity_date="2026-11-24").entries
+    assert entry.item_id == item.id
+    assert entry.local_date == "2026-11-16"
+    assert entry.status == "ready_to_send"
+    assert history.detail(item.id)["support"]["reveals"] == ["hint"]
+    assert history.list(start_date="2026-11-24").entries == ()
+    assert tuesday.today(LONDON).completion_counts == {"2026-11-24": 1}
+
+
 def test_history_reports_saved_drafts_and_original_assessment_state(database):
     """Index status comes from the durable draft and request records."""
     practice = Practice(database, answer_limit=8000, clock=lambda: MONDAY, choose=Random(4).choice)
@@ -105,7 +127,7 @@ def test_history_reports_saved_drafts_and_original_assessment_state(database):
     assert entries[first.id].status == "unfinished"
     assert "draft_text" not in asdict(entries[first.id])
     assert History(database).detail(first.id)["draft"]["text"] == "Saved to finish later."
-    assert entries[second.id].status == "pending_assessment"
+    assert entries[second.id].status == "awaiting_access"
     assert entries[second.id].completed_date == "2026-11-16"
 
 

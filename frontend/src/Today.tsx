@@ -2,6 +2,7 @@ import { Plus } from 'lucide-react'
 import { type RefObject, useCallback, useEffect, useEffectEvent, useRef, useState } from 'react'
 import { LocalApiError, type LocalRequest } from './api'
 import { type Draft, type LeaveEditor, savedAlternative, useUnsavedDraftWarning } from './drafts'
+import { History } from './History'
 import { PracticeCalendar } from './PracticeCalendar'
 import { PracticeFeedback, type GradingStatus, type SavedSubmission } from './PracticeFeedback'
 import { QuestionBrowser, type ReviewDates } from './QuestionBrowser'
@@ -166,6 +167,7 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
   leaveToday: RefObject<LeaveToday | null>
 }) {
   const [session, setSession] = useState<Session>()
+  const [selectedDate, setSelectedDate] = useState<string>()
   const [editor, setEditor] = useState<Editor>()
   const [loadError, setLoadError] = useState(false)
   const [loadAttempt, setLoadAttempt] = useState(0)
@@ -179,6 +181,7 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
   const [initialSubmission, setInitialSubmission] = useState<SavedSubmission>()
   const [openedResume, setOpenedResume] = useState<string>()
   const resumePending = !!resumeItemId && openedResume !== resumeItemId
+  const historyDate = session && selectedDate && selectedDate < session.local_date ? selectedDate : undefined
 
   const [support, setSupport] = useState<SupportView>()
   const feedbackLeave = useRef<LeaveEditor | null>(null)
@@ -309,6 +312,7 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
 
   const showResumedItem = useEffectEvent((item: PracticeItem) => {
     showItem(item)
+    setSelectedDate(undefined)
     setNotice('')
     setBrowsing(false)
   })
@@ -531,6 +535,25 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
     })
   }
 
+  function selectDate(date: string) {
+    if (date === (historyDate ?? session?.local_date)) return
+    void afterDraftSaved(() => setSelectedDate(date === session?.local_date ? undefined : date))
+  }
+
+  function resumeFromCalendar(itemId: string) {
+    void afterDraftSaved(async () => {
+      try {
+        const item = await request<PracticeItem>(`/api/practice/items/${itemId}`)
+        showItem(item)
+        setNotice('')
+        setSelectedDate(undefined)
+        retryToday()
+      } catch {
+        setActionError('Could not open this saved practice item. Try again.')
+      }
+    })
+  }
+
   function retryToday() {
     setLoadError(false)
     requestTodayRefresh()
@@ -564,9 +587,17 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
       <h1>Today</h1>
       {loadFeedback}
       {session && (
-        <PracticeCalendar localDate={session.local_date} firstUseDate={session.first_use_date}
-          counts={session.completion_counts} goal={session.goal} />
+        <PracticeCalendar localDate={session.local_date} selectedDate={historyDate ?? session.local_date}
+          firstUseDate={session.first_use_date} counts={session.completion_counts} goal={session.goal}
+          onSelect={selectDate} />
       )}
+      {historyDate && active && (
+        <>
+          <History key={historyDate} day={historyDate} request={request} onResume={resumeFromCalendar} />
+          {actionError && <p className="error" role="alert">{actionError}</p>}
+        </>
+      )}
+      <div hidden={!!historyDate}>
       {session?.shortage && <p className="notice today-shortage" role="status">{session.shortage}</p>}
       <div className="today-grid">
         <aside className="panel today-session" aria-labelledby="session-heading">
@@ -783,6 +814,7 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
         {browsing && <QuestionBrowser request={request} onPractice={choice => void addQuestion(choice)}
           practiceDisabled={controlsDisabled} reviewDates={reviewDates} />}
       </details>
+      </div>
     </>
   )
 }

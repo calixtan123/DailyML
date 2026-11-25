@@ -34,6 +34,8 @@ function SettingsPage({ retainedAction, setRetainedAction }: {
 }) {
   const [gradingAccount, setGradingAccount] = useState<GradingAccount>()
   const [preferences, setPreferences] = useState<Preferences>()
+  const [connectionRevision, setConnectionRevision] = useState(0)
+  const refreshGradingConnection = useCallback(() => setConnectionRevision(value => value + 1), [])
 
   const updatePreferences = useCallback((next: Preferences) => {
     setPreferences(previous => previous && previous.version > next.version ? previous : next)
@@ -59,11 +61,13 @@ function SettingsPage({ retainedAction, setRetainedAction }: {
     <>
       <h1>Settings</h1>
       <BackupSettings requestFile={requestFile} />
-      <ConnectionSettings request={request} onGradingAccount={updateGradingAccount} />
+      <ConnectionSettings request={request} onGradingAccount={updateGradingAccount}
+        onConnectionRestored={refreshGradingConnection} />
       <GradingSettings
         key={gradingAccount ?? null}
         request={request}
         connected={typeof gradingAccount === 'string'}
+        connectionRevision={connectionRevision}
         uncertainAction={retainedAction && retainedAction.account === gradingAccount ? retainedAction.action : undefined}
         onUncertainActionChange={updateUncertainAction}
         latestPreferences={preferences}

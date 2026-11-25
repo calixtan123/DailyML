@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import subprocess
 import sys
 import threading
 import time
@@ -15,6 +16,14 @@ from daily_ml import openai_oauth
 from daily_ml.connection import Connection, ConnectionError
 from daily_ml.locking import file_lock
 from oauth_support import CLIENT, OTHER_KEY, PLAN, Provider, callback, start, wait_for
+
+
+def test_isolated_oauth_worker_starts_from_another_directory(tmp_path):
+    """The production worker can start from this installation without an HTTP request."""
+    subprocess.run(
+        openai_oauth._PROVIDER_COMMAND, cwd=tmp_path,
+        input=b'["GET", "https://invalid.example", null]', capture_output=True, check=True, timeout=4,
+    )
 
 
 @pytest.fixture
@@ -370,13 +379,16 @@ def test_provider_exchange_is_bounded_and_cancellable(tmp_path, monkeypatch, pha
         # The installed process resolves the production endpoints itself. The test runner routes
         # its fixed URLs to the loopback double inside the disposable child.
         runner = (
+            "import sys; sys.path.insert(0, sys.argv[1]); "
             "from daily_ml import openai_oauth as oauth; "
             f"oauth.TOKEN_ENDPOINT = {token_url!r}; oauth.JWKS = {jwks_url!r}; "
             "oauth._serve_provider_request()"
         )
         monkeypatch.setattr(openai_oauth, "TOKEN_ENDPOINT", token_url)
         monkeypatch.setattr(openai_oauth, "JWKS", jwks_url)
-        monkeypatch.setattr(openai_oauth, "_PROVIDER_COMMAND", (sys.executable, "-I", "-c", runner))
+        monkeypatch.setattr(openai_oauth, "_PROVIDER_COMMAND", (
+            sys.executable, "-I", "-c", runner, openai_oauth._PROVIDER_COMMAND[-1],
+        ))
         monkeypatch.setattr(openai_oauth, "HTTP_TIMEOUT", 1.1)
 
         worker = threading.Thread(target=server.serve_forever)

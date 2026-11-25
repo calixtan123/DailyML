@@ -65,6 +65,29 @@ describe('grading connection test', () => {
     expect(reads()).toBe(1)
   })
 
+  it('dates the saved test and reloads the catalog after reconnecting the same account', async () => {
+    let renewed = false
+    const finishedAt = Date.parse('2026-11-19T15:53:40Z')
+    const request = vi.fn(async (path: string) => {
+      if (path.endsWith('/models')) {
+        if (!renewed) throw new Error('ChatGPT plan access is unavailable.')
+        return models
+      }
+      if (path.endsWith('/usage')) return { attempts_24h: 0 }
+      return { reference: question, latest: { ...assessed, finished_at: finishedAt / 1_000 } }
+    }) as LocalRequest
+    const panel = (connectionRevision: number) => <GradingSettings request={request} connected
+      connectionRevision={connectionRevision} uncertainAction={undefined} onUncertainActionChange={vi.fn()} />
+    const { container, rerender } = render(panel(0))
+    expect(await screen.findByText('ChatGPT plan access is unavailable.')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Last completed connection test' })).toBeTruthy()
+    expect(container.querySelector('time')?.dateTime).toBe('2026-11-19T15:53:40.000Z')
+    renewed = true
+    rerender(panel(1))
+    expect(await screen.findByRole('combobox', { name: 'Grading model' })).toBeTruthy()
+    expect(screen.queryByText('ChatGPT plan access is unavailable.')).toBeNull()
+  })
+
   it('offers an explicit schema recovery and stops polling on disposal', async () => {
     vi.useFakeTimers()
     const { sent, view, reads } = setup({ ...queued, state: 'failed_recoverable',
