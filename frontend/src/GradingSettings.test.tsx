@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { LocalApiError, type LocalRequest } from './api'
@@ -221,7 +221,7 @@ describe('grading connection test', () => {
     fireEvent.change(choice, { target: { value: 'other-model' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save model' }))
     const error = await screen.findByRole('alert')
-    expect(document.activeElement).toBe(error)
+    await waitFor(() => expect(document.activeElement).toBe(error))
     expect(screen.getByRole('button', { name: 'Save model' })).toHaveProperty('disabled', true)
     fireEvent.click(screen.getByRole('button', { name: 'Refresh model catalog' }))
     await screen.findByDisplayValue('Account model')

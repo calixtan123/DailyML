@@ -178,7 +178,11 @@ function AssessmentComparison({ assessment }: { assessment: GradingAssessment })
   )
 }
 
-function Detail({ detail, onResume }: { detail: HistoryDetail; onResume: (itemId: string) => void }) {
+function Detail({ detail, onResume, showDraft }: {
+  detail: HistoryDetail
+  onResume: (itemId: string) => void
+  showDraft: boolean
+}) {
   const disputes = detail.submission?.disputes ?? []
   const canInspectMarking = detail.submission !== null
     || detail.support?.reveals.includes('explanation')
@@ -195,7 +199,7 @@ function Detail({ detail, onResume }: { detail: HistoryDetail; onResume: (itemId
         && <p role="status">Awaiting accepted assessment</p>}
       {detail.review?.due_date && <p>Current review date <time dateTime={detail.review.due_date}>{detail.review.due_date}</time></p>}
       {detail.draft.text && (
-        <details open={!detail.submission}>
+        <details open={showDraft && !detail.submission}>
           <summary>Saved draft</summary>
           <p className="practice-original">{detail.draft.text}</p>
         </details>
@@ -377,7 +381,7 @@ export function History({ request, onResume, day }: {
       )}
       {detail?.kind === 'loading' && <p role="status">Loading saved learning evidence…</p>}
       {detail?.kind === 'error' && <p role="alert">Could not load this saved learning record.</p>}
-      {detail?.kind === 'ready' && <Detail detail={detail.value} onResume={onResume} />}
+      {detail?.kind === 'ready' && <Detail detail={detail.value} onResume={onResume} showDraft={!!day} />}
     </div>
   )
 }
