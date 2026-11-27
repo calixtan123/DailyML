@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from .database import Database
+from .disputes import CURRENT_ASSESSMENT_JOIN, CURRENT_ASSESSMENT_SUMMARY
 from .grading_jobs import practice_grading_status
 from .practice import Practice, PracticeItemNotFound
 from .scheduling import ReviewState, read_reviews
@@ -57,6 +58,12 @@ class HistoryEntry:
         Current durable work state suitable for an index label.
     completed_date : str or None
         Local completion date of the original answer or acknowledged gap.
+    grade : int or None
+        Saved grade of the current track's assessment, where available.
+    has_open_dispute : bool
+        An assessment dispute on a current track is still unresolved.
+    has_revision_draft : bool
+        The learner has saved an assisted revision draft.
     """
 
     item_id: str
@@ -68,6 +75,9 @@ class HistoryEntry:
     title: str
     status: str
     completed_date: str | None
+    grade: int | None
+    has_open_dispute: bool
+    has_revision_draft: bool
 
 
 @dataclass(frozen=True)
@@ -167,19 +177,24 @@ class History:
                             WHEN submission.item_id IS NOT NULL THEN request.state
                             WHEN {_HAS_DRAFT} THEN 'unfinished'
                             ELSE 'support_viewed' END,
-                       COALESCE(gap.completed_date, submission.completed_date), request.error
+                       COALESCE(gap.completed_date, submission.completed_date), request.error,
+                       {CURRENT_ASSESSMENT_SUMMARY}
                 {_SAVED_ITEMS}
                 LEFT JOIN practice_revisions AS revision ON revision.item_id = item.id
                 LEFT JOIN grading_requests AS request
                     ON request.id = COALESCE(revision.current_request_id, submission.current_request_id)
+                {CURRENT_ASSESSMENT_JOIN}
                 WHERE {where}
                 ORDER BY item.created_at DESC, item.id DESC
                 LIMIT :limit
             """, parameters).fetchall()
         has_next = len(rows) > limit
         entries = tuple(
-            HistoryEntry(*fields, practice_grading_status(status or "pending_assessment", error), completed_date)
-            for *fields, status, completed_date, error in rows[:limit]
+            HistoryEntry(
+                *fields, practice_grading_status(status or "pending_assessment", error), completed_date, grade,
+                bool(has_open_dispute), bool(has_revision_draft),
+            )
+            for *fields, status, completed_date, error, grade, has_open_dispute, has_revision_draft in rows[:limit]
         )
         next_cursor = self._encode_cursor(entries[-1]) if has_next else None
         return HistoryPage(entries, next_cursor)

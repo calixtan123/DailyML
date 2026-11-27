@@ -44,7 +44,7 @@ When feedback asks for clarification, edit the clarified answer and send it from
 
 ## Dispute an assessment
 
-Use **Dispute assessment** on a saved assessed answer to retain its exact evaluated version, feedback, and your objection. An open dispute removes only that original answer's accepted assessment from review scheduling; other accepted evidence and any earlier **Review sooner** request remain. If this leaves no accepted assessment, the concept shows **Awaiting accepted assessment** and stays available for practice. The original completion remains in the calendar.
+Use **Dispute assessment** on a saved assessed answer to retain its exact evaluated version, feedback, and your objection. An open dispute removes only that original answer's accepted assessment from review scheduling; other accepted evidence and any earlier **Move review to tomorrow** request remain. If this leaves no accepted assessment, the concept shows **Awaiting accepted assessment** and stays available for practice. The original completion remains in the calendar.
 
 **Request reassessment** sends that same frozen answer, marking guide, references, support classification, and role through the normal grading and usage path. It sends the objection only for that explicit reassessment. Compare the two assessments, then accept either one or leave the dispute open. Accepting a reassessment selects it for the original answer's review replay; an assisted-revision dispute never changes the original answer's review schedule. Reassessment failures and uncertain results remain saved and can be explicitly requested again. SQLite backup and restore retain open disputes, comparison feedback, and selected resolutions.
 ## Fixed grader evaluation
@@ -67,7 +67,7 @@ A release passes only when all 18 cases finish, at least 16 match the expected r
 
 ## History
 
-Open **History** to find saved practice by section or practice date. Select an item to inspect its original question, marking guide, sources, answers and feedback, including any clarification, assisted revision or dispute. History shows when the item was completed or assessed and the concept's current review date when available.
+Open **History** to find saved practice by section or practice date. Each row shows its saved grade or current status and expands to show the original question, answer, feedback, marking guide and sources, including any clarification, assisted revision or dispute. History shows when the item was completed or assessed and the concept's current review date when available.
 
 **Resume practice** opens the same saved item and its draft. **Recover saved answer** opens the saved request so you can review the available grading action. History and drafts are available before signing in. Requesting grading or reassessment requires a connected account.
 

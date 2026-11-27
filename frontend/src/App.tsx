@@ -1,4 +1,4 @@
-import { BookOpen, History as HistoryIcon, Settings } from 'lucide-react'
+import { CalendarDays, History as HistoryIcon, Layers3, Settings } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Dispatch, MouseEvent, SetStateAction } from 'react'
 import { request, requestFile } from './api'
@@ -59,7 +59,7 @@ function SettingsPage({ retainedAction, setRetainedAction }: {
 
   return (
     <>
-      <h1>Settings</h1>
+      <h1 tabIndex={-1}>Settings</h1>
       <BackupSettings requestFile={requestFile} />
       <ConnectionSettings request={request} onGradingAccount={updateGradingAccount}
         onConnectionRestored={refreshGradingConnection} />
@@ -154,43 +154,48 @@ export function App() {
     <>
       <a className="skip-link" href="#main-content" onClick={(event) => {
         event.preventDefault()
-        content.current?.focus()
+        const heading = content.current?.querySelector<HTMLElement>('h1:not([hidden] *)')
+        if (heading) heading.focus()
+        else content.current?.focus()
       }}>Skip to content</a>
       <div className="app">
-        <aside className="sidebar">
+        <header className="topbar">
           <div className="brand">
-            <span className="logo"><BookOpen size={20} aria-hidden="true" /></span>
+            <span className="logo"><Layers3 size={19} aria-hidden="true" /></span>
             <span>Daily ML Practice</span>
           </div>
-          <nav className="main-navigation" aria-label="Main navigation">
-            <a className="nav-link" href="#/today" aria-current={page === 'Today' ? 'page' : undefined}
-              onClick={(event) => navigateLink(event, 'Today')}>
-              <BookOpen size={17} aria-hidden="true" /> Today
-            </a>
-            <a className="nav-link" href="#/history" aria-current={page === 'History' ? 'page' : undefined}
-              onClick={(event) => navigateLink(event, 'History')}>
-              <HistoryIcon size={17} aria-hidden="true" /> History
-            </a>
-            <a className="nav-link" href="#/settings" aria-current={page === 'Settings' ? 'page' : undefined}
-              onClick={(event) => navigateLink(event, 'Settings')}>
-              <Settings size={17} aria-hidden="true" /> Settings
-            </a>
-          </nav>
-        </aside>
-        <div className="workspace">
-          <header className="topbar"><span>Daily ML Practice</span><span aria-hidden="true">/</span> {page}</header>
-          <main id="main-content" tabIndex={-1} ref={content}>
+        </header>
+        <main id="main-content" tabIndex={-1} ref={content}>
+          <div className="page-layout">
+            <nav className="main-navigation" aria-label="Main navigation">
+              <a className="nav-link" href="#/today" aria-current={page === 'Today' ? 'page' : undefined}
+                onClick={(event) => navigateLink(event, 'Today')}>
+                <CalendarDays size={17} aria-hidden="true" /> Today
+              </a>
+              <a className="nav-link" href="#/history" aria-current={page === 'History' ? 'page' : undefined}
+                onClick={(event) => navigateLink(event, 'History')}>
+                <HistoryIcon size={17} aria-hidden="true" /> History
+              </a>
+              <a className="nav-link" href="#/settings" aria-current={page === 'Settings' ? 'page' : undefined}
+                onClick={(event) => navigateLink(event, 'Settings')}>
+                <Settings size={17} aria-hidden="true" /> Settings
+              </a>
+            </nav>
             {openedToday && (
-              <div hidden={page !== 'Today'}>
+              <div className="today-screen" hidden={page !== 'Today'}>
                 <Today request={request} active={page === 'Today'} leaveToday={leaveToday} resumeItemId={practiceItemId} />
               </div>
             )}
-            {page === 'History' && <History request={request} onResume={itemId => void navigate('Today', itemId)} />}
+            {page === 'History' && <div className="page-content">
+              <History request={request} onResume={itemId => void navigate('Today', itemId)} />
+            </div>}
             {page === 'Settings' && (
-              <SettingsPage retainedAction={retainedAction} setRetainedAction={setRetainedAction} />
+              <div className="page-content">
+                <SettingsPage retainedAction={retainedAction} setRetainedAction={setRetainedAction} />
+              </div>
             )}
-          </main>
-        </div>
+          </div>
+        </main>
       </div>
     </>
   )

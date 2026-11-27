@@ -1,9 +1,7 @@
 import { CalendarDays, ChevronLeft, ChevronRight } from 'lucide-react'
 
 const DAY_MS = 86_400_000
-const TODAY_LABEL = new Intl.DateTimeFormat('en-GB', {
-  timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long',
-})
+const SHORT_DATE = new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', day: 'numeric', month: 'short' })
 const DATE_LABEL = new Intl.DateTimeFormat('en-GB', {
   timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
 })
@@ -32,7 +30,7 @@ export function PracticeCalendar({ localDate, selectedDate, firstUseDate, counts
     <section className="panel practice-calendar" aria-label="Weekly practice calendar">
       <div className="today-date">
         <CalendarDays size={19} aria-hidden="true" />
-        <time dateTime={selectedDate}>{TODAY_LABEL.format(selected)}</time>
+        <span className="calendar-range">{SHORT_DATE.formatRange(monday, monday + 6 * DAY_MS)}</span>
         <span className="muted" role="status">
           {isToday ? (completed === 0 ? 'No practice yet today' : todayProgress) : `${completed} completed`}
         </span>
@@ -59,7 +57,7 @@ export function PracticeCalendar({ localDate, selectedDate, firstUseDate, counts
               <button type="button" aria-current={iso === localDate ? 'date' : undefined}
                 aria-pressed={iso === selectedDate} disabled={!marked} onClick={() => onSelect(iso)}
                 aria-label={`${DATE_LABEL.format(date)}, ${detail}`}>
-                <span aria-hidden="true">{WEEKDAY_LABEL.format(date)} {date.getUTCDate()}</span>
+                <span aria-hidden="true">{WEEKDAY_LABEL.format(date)} <b>{date.getUTCDate()}</b></span>
                 <strong aria-hidden="true">{marked ? count : '–'}</strong>
               </button>
             </li>

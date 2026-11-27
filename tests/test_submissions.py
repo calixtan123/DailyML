@@ -167,6 +167,13 @@ def test_resolving_original_dispute_with_reassessment_selects_only_its_saved_ver
         "request_id": original["request"]["id"], "objection": "Please assess this reasoning again.",
     }).json()
 
+    entry, = client.get("/api/history").json()["entries"]
+    assert entry["grade"] == opened["request"]["grade"] == 3
+    assert entry["has_open_dispute"] is True
+    client.app.state.grading.provider = provider(
+        lambda outbound: response_stream(_valid_terminal(outbound, criterion_status="not_met")),
+    )
+
     reassessed = _reassess(client, headers, item["id"], opened["disputes"][0]["id"])
 
     assert reassessed.status_code == 202
@@ -182,6 +189,15 @@ def test_resolving_original_dispute_with_reassessment_selects_only_its_saved_ver
     assert resolved.status_code == 200
     assert resolved.json()["disputes"][0]["selected_request_id"] == reassessment["id"]
     assert resolved.json()["credited"] is True
+    assert resolved.json()["request"]["grade"] == 3
+    entry, = client.get("/api/history").json()["entries"]
+    assert entry["grade"] == reassessment["grade"] == 0
+    assert entry["has_open_dispute"] is False
+    saved_item = client.get(f"/api/practice/items/{item['id']}").json()
+    assert saved_item["grade"] == 0
+    assert saved_item["has_open_dispute"] is False
+    submitted = next(saved for saved in _today(client, headers)["submitted"] if saved["id"] == item["id"])
+    assert submitted["grade"] == 0
     with db.connect() as connection:
         assert connection.execute("""
             SELECT evidence.grading_request_id FROM review_evidence_selection AS selection
@@ -384,7 +400,7 @@ def test_late_reassessment_is_retained_without_overriding_original_resolution(le
     assert any(entry["id"] == reassessment_id and entry["state"] == "assessed" for entry in saved["assessments"])
 
 
-def _valid_terminal(http_request):
+def _valid_terminal(http_request, *, criterion_status="met"):
     """Construct feedback for the exact question rubric that traversed the SDK."""
     import json
     from test_grading import example_feedback
@@ -392,7 +408,7 @@ def _valid_terminal(http_request):
     context = json.loads(json.loads(http_request.content)["input"][0]["content"])
     answer = example_feedback()
     answer["feedback"]["criteria"] = [
-        {"criterion_id": entry["id"], "status": "met", "justification": "Explains the criterion."}
+        {"criterion_id": entry["id"], "status": criterion_status, "justification": "Example criterion evaluation."}
         for entry in context["criteria"]
     ]
     answer["feedback"]["source_ids"] = [next(iter(context["sources"]))]
@@ -667,6 +683,10 @@ def test_one_assisted_revision_keeps_credit_and_schedule_through_retry_and_backu
     draft = client.put(f"{base}/revision-draft", headers=headers, json=action)
     assert draft.status_code == 200
     assert client.get(f"{base}/submission").json()["revision_draft"] == {"text": action["text"], "version": 1}
+    pending = next(saved for saved in _today(client, headers)["submitted"] if saved["id"] == item_id)
+    assert pending["has_revision_draft"] is True
+    entry, = client.get("/api/history").json()["entries"]
+    assert entry["has_revision_draft"] is True
     stale = {**action, "text": "Stale tab text."}
     for response in [
         client.put(f"{base}/revision-draft", headers=headers, json=stale),
@@ -679,6 +699,8 @@ def test_one_assisted_revision_keeps_credit_and_schedule_through_retry_and_backu
     failed = client.get(f"{base}/submission").json()
     assert failed["revision"]["request"]["state"] == "awaiting_allowance"
     assert failed["revision"]["supported"] is True
+    entry, = client.get("/api/history").json()["entries"]
+    assert (entry["status"], entry["grade"], entry["has_revision_draft"]) == ("awaiting_allowance", None, False)
     assert _retry(client, headers, item_id, failed["revision"]["request"]["id"]).status_code == 202
     result = client.get(f"{base}/submission").json()
     revision = result["revision"]
