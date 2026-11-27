@@ -611,7 +611,7 @@ describe('Today practice editor', () => {
     today.completion_counts['2026-11-19'] = 3
     today.selections[0].item = { ...today.selections[0].item, submitted: true, grading_status: 'assessed', grade: 0 }
     render(<App />)
-    const assessment = await screen.findByRole('region', { name: 'Assessment', exact: true })
+    const assessment = await screen.findByRole('region', { name: 'Assessment' })
     expect(within(assessment).getByText('Grade 0 of 3')).toBeTruthy()
     expect(await screen.findByRole('button', { name: /Generalisation.*Grade 0 of 3/ })).toBeTruthy()
     expect(screen.getByText('Your submitted answer')).toBeTruthy()

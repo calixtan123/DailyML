@@ -52,7 +52,7 @@ test('opens a dispute, compares a reassessment and accepts it explicitly', async
   render(<PracticeFeedback itemId="item" active request={request} initial={submission}
     answerLimit={8000} navigationPending={false} leaveEditor={{ current: null }} onStatus={vi.fn()} />)
 
-  const original = within(screen.getByRole('region', { name: 'Original attempt', exact: true }))
+  const original = within(screen.getByRole('region', { name: 'Original attempt' }))
   expect(original.getByRole('heading', { name: 'What to improve' })).toBeTruthy()
   expect(original.getByText('No corrections recorded.')).toBeTruthy()
 
