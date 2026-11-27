@@ -65,7 +65,7 @@ test('The installed app saves practice drafts and preserves Settings and sign-in
       const skip = page.getByRole('link', { name: 'Skip to content' })
       await expect(skip).toBeFocused()
       await skip.press('Enter')
-      await expect(page.getByRole('main')).toBeFocused()
+      await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeFocused()
 
       await page.setViewportSize({ width: 1440, height: 900 })
       const session = page.getByRole('complementary', { name: 'Today’s session' })

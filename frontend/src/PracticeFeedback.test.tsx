@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, expect, test, vi } from 'vitest'
 import type { LocalRequest } from './api'
 import { PracticeFeedback, type SavedSubmission } from './PracticeFeedback'
@@ -51,6 +51,10 @@ test('opens a dispute, compares a reassessment and accepts it explicitly', async
   }
   render(<PracticeFeedback itemId="item" active request={request} initial={submission}
     answerLimit={8000} navigationPending={false} leaveEditor={{ current: null }} onStatus={vi.fn()} />)
+
+  const original = within(screen.getByRole('region', { name: 'Original attempt', exact: true }))
+  expect(original.getByRole('heading', { name: 'What to improve' })).toBeTruthy()
+  expect(original.getByText('No corrections recorded.')).toBeTruthy()
 
   fireEvent.click(screen.getByRole('button', { name: 'Dispute assessment' }))
   fireEvent.change(screen.getByLabelText('Your objection'), { target: { value: objection } })

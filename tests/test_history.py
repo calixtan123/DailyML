@@ -184,6 +184,7 @@ def test_history_help_only_and_cross_day_gap_completion(database):
     practice.acknowledge_gap(item.id, "gap-action", resolve_timezone=lambda _: LONDON)
     entry, = history.list().entries
     assert (entry.status, entry.completed_date, entry.local_date) == ("self_reported_gap", "2026-11-17", "2026-11-16")
+    assert entry.grade is None
     detail = history.detail(item.id)
     assert detail["submission"]["request"]["state"] == "self_reported_gap"
     assert detail["submission"]["completed_date"] == entry.completed_date

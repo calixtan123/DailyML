@@ -1,10 +1,10 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { LocalRequest } from './api'
 import { History } from './History'
 
 const entries = [
-  { item_id: 'saved-1', local_date: '2026-11-17', section_id: 'fundamentals', section_title: 'Fundamentals', title: 'Generalisation', status: 'assessed', completed_date: '2026-11-17' },
+  { item_id: 'saved-1', local_date: '2026-11-17', section_id: 'fundamentals', section_title: 'Fundamentals', title: 'Generalisation', status: 'assessed', grade: 0, has_open_dispute: false, completed_date: '2026-11-17' },
 ]
 
 function detail(itemId = 'saved-1') {
@@ -22,7 +22,7 @@ function detail(itemId = 'saved-1') {
     submission: {
       assessed_text: 'Original saved answer', text: 'Original saved answer', completed_date: '2026-11-17', completed_timezone: 'Europe/London', credited: true,
       submission_version_id: 'v1', supported: false, clarification_draft: null, revision_draft: null,
-      request: { id: 'request-1', state: 'assessed', grade: 2, can_send: false, message: null, reference: { sources: {} }, feedback: { status: 'assessed', summary: 'Good reasoning', corrections: ['Name the held-out split'], model_answer: 'Use new data.', reasoning: ['Split first'], example: 'A validation set', source_ids: [] } },
+      request: { id: 'request-1', state: 'assessed', grade: 0, can_send: false, message: null, reference: { sources: {} }, feedback: { status: 'assessed', summary: 'Good reasoning', corrections: ['Name the held-out split'], model_answer: 'Use new data.', reasoning: ['Split first'], example: 'A validation set', source_ids: [] } },
       versions: [
         { id: 'v1', role: 'original', kind: 'initial', parent_version_id: null, text: 'Original saved answer', supported: false, created_at: 1, request: { id: 'request-1', state: 'assessed', grade: 2, can_send: false, message: null, finished_at: 1_794_998_400, reference: { sources: {} }, feedback: { status: 'assessed', summary: 'Original version explanation', corrections: [], model_answer: 'Version model answer.', reasoning: ['Version reasoning'], example: 'Version example', source_ids: [] } } },
         { id: 'v2', role: 'original', kind: 'clarification', parent_version_id: 'v1', text: 'Clarified saved answer', supported: false, created_at: 2, request: { id: 'request-2', state: 'assessed', grade: 3, can_send: false, message: null, finished_at: 1_794_998_401, reference: { sources: {} }, feedback: null } },
@@ -53,15 +53,25 @@ function mockRequest(handler?: (path: string) => unknown) {
 afterEach(cleanup)
 
 describe('History', () => {
-  it('opens the first saved question on the selected calendar day with its viewed hint and assessment', async () => {
+  it('opens the selected calendar record inline with its saved score, answer and assessment', async () => {
     const { request, spy } = mockRequest()
     render(<History day="2026-11-17" request={request} onResume={vi.fn()} />)
-    expect(await screen.findByText('Think about unseen examples.')).toBeTruthy()
+    const toggle = await screen.findByRole('button', { name: 'Generalisation' })
+    const row = toggle.closest('li')!
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(within(row).getByText('Grade 0 of 3')).toBeTruthy()
+    expect(spy).not.toHaveBeenCalledWith('/api/history/saved-1', expect.anything())
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(await within(row).findByText('Think about unseen examples.')).toBeTruthy()
     expect(screen.getAllByText('Original saved answer').length).toBeGreaterThan(0)
     expect(screen.getByText('Good reasoning')).toBeTruthy()
-    expect(screen.getAllByText('Grade 2 of 3').length).toBeGreaterThan(0)
+    expect(within(row).getAllByText('Grade 0 of 3')).toHaveLength(2)
     expect(spy).toHaveBeenCalledWith('/api/history?activity_date=2026-11-17', expect.anything())
     expect(screen.queryByLabelText('From date')).toBeNull()
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(within(row).queryByText('Good reasoning')).toBeNull()
   })
 
   it.each([undefined, '2026-11-17'])('retries and refreshes a selected record (calendar day %s)', async day => {
@@ -79,13 +89,33 @@ describe('History', () => {
     })
     render(<History day={day} request={request} onResume={vi.fn()} />)
     const entry = await screen.findByRole('button', { name: 'Generalisation' })
-    if (!day) fireEvent.click(entry)
+    fireEvent.click(entry)
     const retry = await screen.findByRole('button', { name: 'Retry loading record' })
-    fireEvent.click(day ? entry : retry)
+    fireEvent.click(retry)
     expect(await screen.findByText('Initial feedback')).toBeTruthy()
+    fireEvent.click(entry)
+    expect(screen.queryByText('Initial feedback')).toBeNull()
     fireEvent.click(entry)
     expect(await screen.findByText('Updated feedback')).toBeTruthy()
     expect(reads).toBe(3)
+  })
+
+  it('shows useful statuses for ungraded records and loads no detail until one is opened', async () => {
+    const { request, spy } = mockRequest(path => {
+      if (path === '/api/history/sections') return []
+      if (path !== '/api/history') throw new Error(`Unexpected path ${path}`)
+      return { entries: [
+        { ...entries[0], item_id: 'draft', title: 'Unfinished', status: 'unfinished', grade: null },
+        { ...entries[0], item_id: 'pending', title: 'Pending', status: 'awaiting_access', grade: null },
+        { ...entries[0], item_id: 'gap', title: 'Known gap', status: 'self_reported_gap', grade: null },
+      ], next_cursor: null }
+    })
+    render(<History request={request} onResume={vi.fn()} />)
+    await screen.findByText('Unfinished draft')
+    expect(screen.getByText('Waiting for grading access')).toBeTruthy()
+    expect(screen.getByText('Self-reported gap')).toBeTruthy()
+    expect(screen.queryByText(/Grade .* of 3/)).toBeNull()
+    expect(spy.mock.calls.map(([path]) => path)).toEqual(['/api/history/sections', '/api/history'])
   })
 
   it('loads saved history with labelled filters and submits the selected query', async () => {

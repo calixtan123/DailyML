@@ -1,4 +1,7 @@
+import { ChevronDown } from 'lucide-react'
 import { type FormEvent, useEffect, useRef, useState } from 'react'
+import { AnswerText, Assessment, GradeScore } from './Assessment'
+import { formatPracticeDate } from './practiceDates'
 import type { SavedSubmission } from './PracticeFeedback'
 import type { LocalRequest } from './api'
 
@@ -10,6 +13,9 @@ type HistoryEntry = {
   section_title: string
   title: string
   status: string
+  grade: number | null
+  has_open_dispute: boolean
+  has_revision_draft: boolean
   completed_date: string | null
 }
 type HistoryPage = { entries: HistoryEntry[]; next_cursor: string | null }
@@ -80,50 +86,45 @@ function requestPath(filters: { section: string; start: string; end: string }, c
   return query ? `/api/history?${query}` : '/api/history'
 }
 
+function SavedAssessment({ request, title }: { request: SavedSubmission['request']; title?: string }) {
+  if (request.feedback?.status === 'assessed') {
+    return <Assessment grade={request.grade} feedback={request.feedback} sources={request.reference?.sources} title={title} />
+  }
+  if (request.feedback?.status === 'needs_clarification') return <p>{request.feedback.explanation}</p>
+  return <p>{request.message ?? STATUS_LABELS[request.state] ?? 'Feedback is not available yet.'}</p>
+}
+
 function Feedback({ submission }: { submission: SavedSubmission }) {
   const tracks = [
-    { label: 'Original assessment', answer: submission, assisted: Boolean(submission.assisted) },
-    ...(submission.revision ? [{ label: 'Assisted revision assessment', answer: submission.revision, assisted: submission.revision.supported }] : []),
+    { label: 'Original attempt', answer: submission, assisted: Boolean(submission.assisted) },
+    ...(submission.revision ? [{ label: 'Assisted revision', answer: submission.revision, assisted: submission.revision.supported }] : []),
   ]
   return (
-    <section aria-label="Saved assessments">
-      <h3>Saved answers and feedback</h3>
+    <section className="saved-feedback" aria-label="Saved assessments">
       {tracks.map(({ label, answer, assisted }) => (
-        <details key={label} open>
-          <summary>{label}</summary>
-          <p>{assisted ? 'Assisted answer — learning support was used before submission.' : 'Independent answer — no learning support was used before submission.'}</p>
-          <p className="practice-original">{answer.assessed_text}</p>
-          {answer.request.feedback?.status === 'assessed' && (
-            <>
-              <p>Grade {answer.request.grade} of 3</p>
-              <p>{answer.request.feedback.summary}</p>
-              {answer.request.feedback.corrections.length > 0 && (
-                <ul>{answer.request.feedback.corrections.map((correction, index) => <li key={index}>{correction}</li>)}</ul>
-              )}
-              <details>
-                <summary>Teaching detail</summary>
-                <p>{answer.request.feedback.model_answer}</p>
-                <ol>{answer.request.feedback.reasoning.map((step, index) => <li key={index}>{step}</li>)}</ol>
-                <p>{answer.request.feedback.example}</p>
-              </details>
-            </>
-          )}
-          {answer.request.feedback?.status === 'needs_clarification' && <p>{answer.request.feedback.explanation}</p>}
-          {!answer.request.feedback && (
-            <p>{answer.request.message ?? STATUS_LABELS[answer.request.state] ?? 'Feedback is not available yet.'}</p>
-          )}
+        <section className="practice-attempt" key={label} aria-label={label}>
+          <h4>{label}</h4>
+          <SavedAssessment request={answer.request} />
+          <AnswerText label={answer.request.state === 'self_reported_gap' ? 'Recorded answer' : 'Your submitted answer'}
+            text={answer.assessed_text} open />
+          {answer.request.state !== 'self_reported_gap' && <p className="muted">{assisted
+            ? 'Assisted answer — learning support was used before submission.'
+            : 'Independent answer — no learning support was used before submission.'}</p>}
           {answer.request.state === 'awaiting_access' && <a href="#/settings">Open grading settings</a>}
-        </details>
+        </section>
       ))}
       {submission.versions.length > 1 && (
         <details>
           <summary>Answer versions</summary>
-          {submission.versions.map((version) => (
-            <div key={version.id}>
+          {submission.versions.map(version => (
+            <section className="practice-attempt" key={version.id} aria-label="Saved version assessment">
               <h4>{version.kind === 'revision' ? 'Assisted revision' : version.kind === 'clarification' ? 'Clarification' : 'Original answer'}</h4>
               <p className="practice-original">{version.text}</p>
-              <HistoricalVersionEvidence request={version.request} />
-            </div>
+              {version.request.finished_at != null && (
+                <p>Assessment saved <time dateTime={new Date(version.request.finished_at * 1000).toISOString()}>{new Date(version.request.finished_at * 1000).toLocaleString()}</time></p>
+              )}
+              <SavedAssessment request={version.request} />
+            </section>
           ))}
         </details>
       )}
@@ -131,79 +132,32 @@ function Feedback({ submission }: { submission: SavedSubmission }) {
   )
 }
 
-function HistoricalVersionEvidence({ request }: { request: SavedSubmission['versions'][number]['request'] }) {
-  const historical = request as typeof request & { finished_at?: number | null }
-  return (
-    <section aria-label="Saved version assessment">
-      {historical.finished_at !== undefined && historical.finished_at !== null && (
-        <p>Assessment saved <time dateTime={new Date(historical.finished_at * 1000).toISOString()}>{new Date(historical.finished_at * 1000).toLocaleString()}</time></p>
-      )}
-      {request.feedback?.status === 'assessed' && (
-        <>
-          <p>Grade {request.grade} of 3</p>
-          <p>{request.feedback.summary}</p>
-          <details>
-            <summary>Saved version explanation</summary>
-            <p>{request.feedback.model_answer}</p>
-            <ol>{request.feedback.reasoning.map((step, index) => <li key={index}>{step}</li>)}</ol>
-            <p>{request.feedback.example}</p>
-          </details>
-        </>
-      )}
-      {request.feedback?.status === 'needs_clarification' && <p>{request.feedback.explanation}</p>}
-      {!request.feedback && request.message && <p>{request.message}</p>}
-    </section>
-  )
-}
-
-function AssessmentComparison({ assessment }: { assessment: GradingAssessment }) {
-  return (
-    <section className="practice-attempt" aria-label="Saved assessment comparison">
-      <p>Assessment grade {assessment.grade ?? 'pending'} ({assessment.state})</p>
-      {assessment.feedback?.status === 'assessed' && (
-        <>
-          <p>{assessment.feedback.summary}</p>
-          {assessment.feedback.corrections.length > 0 && <ul>{assessment.feedback.corrections.map((correction, index) => <li key={index}>{correction}</li>)}</ul>}
-          <details>
-            <summary>Saved assessment explanation</summary>
-            <p>{assessment.feedback.model_answer}</p>
-            <ol>{assessment.feedback.reasoning.map((step, index) => <li key={index}>{step}</li>)}</ol>
-            <p>{assessment.feedback.example}</p>
-          </details>
-        </>
-      )}
-      {assessment.feedback?.status === 'needs_clarification' && <p>{assessment.feedback.explanation}</p>}
-      {!assessment.feedback && assessment.message && <p>{assessment.message}</p>}
-    </section>
-  )
-}
-
-function Detail({ detail, onResume, showDraft }: {
+function Detail({ detail, onResume }: {
   detail: HistoryDetail
   onResume: (itemId: string) => void
-  showDraft: boolean
 }) {
   const disputes = detail.submission?.disputes ?? []
   const canInspectMarking = detail.submission !== null
     || detail.support?.reveals.includes('explanation')
     || detail.support?.reveals.includes('gap_explanation')
   return (
-    <article className="panel" aria-labelledby="history-detail-title">
-      <h2 id="history-detail-title">{detail.question.title}</h2>
-      <p>{detail.question.prompt}</p>
-      <p>{detail.question.objective}</p>
-      <p>Saved on <time dateTime={detail.local_date}>{detail.local_date}</time></p>
-      {detail.submission && <p>Completed on <time dateTime={detail.submission.completed_date}>{detail.submission.completed_date}</time></p>}
-      {detail.assessed_at !== null && <p>Assessment saved {new Date(detail.assessed_at * 1000).toLocaleString()}</p>}
-      {detail.review?.awaiting_assessment && detail.submission?.request.state === 'assessed'
-        && <p role="status">Awaiting accepted assessment</p>}
-      {detail.review?.due_date && <p>Current review date <time dateTime={detail.review.due_date}>{detail.review.due_date}</time></p>}
-      {detail.draft.text && (
-        <details open={showDraft && !detail.submission}>
-          <summary>Saved draft</summary>
-          <p className="practice-original">{detail.draft.text}</p>
-        </details>
-      )}
+    <article className="history-detail" aria-labelledby={`history-question-${detail.item_id}`}>
+      <header className="history-question">
+        <h3 id={`history-question-${detail.item_id}`}>{detail.question.title}</h3>
+        <p>{detail.question.prompt}</p>
+        <p className="muted">{detail.question.objective}</p>
+        {detail.review?.due_date && <p className="muted">Current review date <time dateTime={detail.review.due_date}>{formatPracticeDate(detail.review.due_date)}</time></p>}
+        {detail.review?.awaiting_assessment && detail.submission?.request.state === 'assessed'
+          && <p role="status">Awaiting accepted assessment</p>}
+      </header>
+      {detail.submission && <Feedback submission={detail.submission} />}
+      {detail.draft.text && <AnswerText label="Saved draft" text={detail.draft.text} open={!detail.submission} />}
+      <details>
+        <summary>Practice dates</summary>
+        <p>Saved on <time dateTime={detail.local_date}>{detail.local_date}</time></p>
+        {detail.submission && <p>Completed on <time dateTime={detail.submission.completed_date}>{detail.submission.completed_date}</time></p>}
+        {detail.assessed_at !== null && <p>Assessment saved {new Date(detail.assessed_at * 1000).toLocaleString()}</p>}
+      </details>
       {detail.question.hint && detail.support?.reveals.includes('hint') && (
         <section className="practice-support-content" aria-label="Saved hint">
           <h3>Hint</h3>
@@ -217,14 +171,18 @@ function Detail({ detail, onResume, showDraft }: {
           {detail.support.gap_completed && <p>A self-reported knowledge gap was saved.</p>}
         </details>
       )}
-      {detail.submission && <Feedback submission={detail.submission} />}
       {disputes.map(dispute => (
         <section key={dispute.id} aria-label="Saved assessment dispute">
-          <h3>Assessment dispute</h3>
+          <h4>Assessment dispute</h4>
           <p>{dispute.status === 'resolved' ? 'Resolved' : 'Open'} {dispute.role} assessment dispute</p>
           <p>{dispute.objection}</p>
           {dispute.selected_request_id && <p>Selected assessment: {dispute.selected_request_id === dispute.target_request_id ? 'Original assessment' : 'Reassessment'}.</p>}
-          {dispute.assessments.map(assessment => <AssessmentComparison key={assessment.id} assessment={assessment} />)}
+          {dispute.assessments.map(assessment => {
+            const label = assessment.id === dispute.target_request_id ? 'Disputed assessment' : 'Reassessment'
+            return <div className="practice-attempt" key={assessment.id}>
+              <SavedAssessment request={assessment} title={assessment.id === dispute.selected_request_id ? `Accepted ${label.toLowerCase()}` : label} />
+            </div>
+          })}
         </section>
       ))}
       {canInspectMarking ? (
@@ -259,10 +217,9 @@ export function History({ request, onResume, day }: {
   const [loadMoreError, setLoadMoreError] = useState(false)
   const [pageRetry, setPageRetry] = useState(0)
   const [selectedItemId, setSelectedItemId] = useState<string>()
-  const [detail, setDetail] = useState<LoadState<HistoryDetail> | undefined>()
+  const [detail, setDetail] = useState<{ itemId: string; revision: number; state: Exclude<LoadState<HistoryDetail>, { kind: 'loading' }> }>()
   const [detailRevision, setDetailRevision] = useState(0)
   const requestSequence = useRef(0)
-  const itemId = selectedItemId ?? (day && page.kind === 'ready' ? page.value.entries[0]?.item_id : undefined)
 
   useEffect(() => {
     if (day) return
@@ -328,19 +285,22 @@ export function History({ request, onResume, day }: {
   }
 
   useEffect(() => {
+    const itemId = selectedItemId
     if (!itemId) return
     const controller = new AbortController()
-    setDetail({ kind: 'loading' })
+    const settle = (state: Exclude<LoadState<HistoryDetail>, { kind: 'loading' }>) => {
+      if (!controller.signal.aborted) setDetail({ itemId, revision: detailRevision, state })
+    }
     request<HistoryDetail>(`/api/history/${itemId}`, { signal: controller.signal }).then(
-      value => { if (!controller.signal.aborted) setDetail({ kind: 'ready', value }) },
-      () => { if (!controller.signal.aborted) setDetail({ kind: 'error' }) },
+      value => settle(value.item_id === itemId ? { kind: 'ready', value } : { kind: 'error' }),
+      () => settle({ kind: 'error' }),
     )
     return () => controller.abort()
-  }, [request, itemId, detailRevision])
+  }, [request, selectedItemId, detailRevision])
 
   return (
     <div className="history">
-      {day ? <h2>Saved practice</h2> : <h1>History</h1>}
+      {day ? <h2>Saved practice</h2> : <h1 tabIndex={-1}>History</h1>}
       {!day && <form className="panel" onSubmit={applyFilters}>
         <div>
           <label htmlFor="history-section">Section</label>
@@ -372,26 +332,50 @@ export function History({ request, onResume, day }: {
         </p> : (
           <section aria-label="Saved learning history">
             <ul>
-              {page.value.entries.map(entry => (
-                <li key={entry.item_id}>
-                  <button type="button" aria-pressed={entry.item_id === itemId}
-                    onClick={() => {
-                      setSelectedItemId(entry.item_id)
-                      if (entry.item_id === itemId) refreshDetail()
-                    }}>{entry.title}</button>
-                  <p>{entry.section_title} · <time dateTime={entry.local_date}>{entry.local_date}</time> · {STATUS_LABELS[entry.status] ?? entry.status}</p>
-                </li>
-              ))}
+              {page.value.entries.map(entry => {
+                const open = entry.item_id === selectedItemId
+                const evidence = detail?.itemId === entry.item_id && detail.revision === detailRevision ? detail.state : undefined
+                const titleId = `history-title-${entry.item_id}`
+                const metaId = `history-meta-${entry.item_id}`
+                const statusId = `history-status-${entry.item_id}`
+                const detailId = `history-detail-${entry.item_id}`
+                return (
+                  <li className="history-record" key={entry.item_id}>
+                    <button className="history-record-toggle" type="button" aria-expanded={open} aria-controls={detailId}
+                      aria-labelledby={titleId} aria-describedby={`${metaId} ${statusId}`}
+                      onClick={() => {
+                        setDetail(undefined)
+                        setSelectedItemId(open ? undefined : entry.item_id)
+                      }}>
+                      <span className="history-record-name">
+                        <strong id={titleId}>{entry.title}</strong>
+                        <span id={metaId}>{entry.section_title} · <time dateTime={entry.local_date}>{entry.local_date}</time></span>
+                      </span>
+                      <span className="history-record-status" id={statusId}>
+                        {entry.has_open_dispute && <span>Dispute open</span>}
+                        {entry.has_revision_draft && <span>Revision draft</span>}
+                        {entry.grade != null ? <GradeScore grade={entry.grade} />
+                          : <span>{STATUS_LABELS[entry.status] ?? entry.status}</span>}
+                      </span>
+                      <ChevronDown className="history-record-chevron" size={18} aria-hidden="true" />
+                    </button>
+                    <div id={detailId} className="history-record-body" hidden={!open}>
+                      {open && (
+                        !evidence ? <p role="status">Loading saved learning evidence…</p>
+                          : evidence.kind === 'error' ? <p role="alert">Could not load this saved learning record.{' '}
+                            <button type="button" onClick={refreshDetail}>Retry loading record</button>
+                          </p>
+                            : <Detail detail={evidence.value} onResume={onResume} />
+                      )}
+                    </div>
+                  </li>
+                )
+              })}
             </ul>
             {page.value.next_cursor && <button type="button" onClick={loadMore} disabled={loadingMore}>Load more history</button>}
           </section>
         )
       )}
-      {detail?.kind === 'loading' && <p role="status">Loading saved learning evidence…</p>}
-      {detail?.kind === 'error' && <p role="alert">Could not load this saved learning record.{' '}
-        <button type="button" onClick={refreshDetail}>Retry loading record</button>
-      </p>}
-      {detail?.kind === 'ready' && <Detail detail={detail.value} onResume={onResume} showDraft={!!day} />}
     </div>
   )
 }

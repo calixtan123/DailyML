@@ -1,10 +1,12 @@
-import { Plus } from 'lucide-react'
+import { CalendarDays, ChevronRight, Clock3, ListChecks, Plus } from 'lucide-react'
 import { type RefObject, useCallback, useEffect, useEffectEvent, useRef, useState } from 'react'
+import { GradeScore } from './Assessment'
 import { LocalApiError, type LocalRequest } from './api'
 import { type Draft, type LeaveEditor, savedAlternative, useUnsavedDraftWarning } from './drafts'
 import { History } from './History'
 import { PracticeCalendar } from './PracticeCalendar'
-import { PracticeFeedback, type GradingStatus, type SavedSubmission } from './PracticeFeedback'
+import { PracticeFeedback, type GradingStatus, type SavedSubmission, type SubmissionProgress } from './PracticeFeedback'
+import { formatPracticeDate, nextPracticeDate } from './practiceDates'
 import { QuestionBrowser, type ReviewDates } from './QuestionBrowser'
 
 type PracticeItem = {
@@ -23,6 +25,9 @@ type PracticeItem = {
   draft: Draft
   submitted: boolean
   grading_status: GradingStatus | null
+  grade?: number | null
+  has_open_dispute?: boolean
+  has_revision_draft?: boolean
 }
 type Selection = { item: PracticeItem; kind: 'review' | 'variety' | 'extra' | 'focused' }
 type Review = { stage: number; due_date: string | null; awaiting_assessment: boolean }
@@ -97,12 +102,21 @@ const SESSION_GRADING_LABELS: Record<GradingStatus, string> = {
 }
 
 function gradingLabel(item: PracticeItem) {
-  return item.grading_status ? SESSION_GRADING_LABELS[item.grading_status] : 'Submitted'
+  const status = item.grading_status ? SESSION_GRADING_LABELS[item.grading_status] : 'Submitted'
+  if (item.has_open_dispute) return `${status} · Dispute open`
+  if (item.has_revision_draft) return 'Revision draft'
+  return status
 }
 
-function updateGradingStatus(session: Session, itemId: string, status: GradingStatus): Session {
-  if (findItem(session, itemId)?.grading_status === status) return session
-  const update = (item: PracticeItem) => item.id === itemId ? { ...item, grading_status: status } : item
+function hasProgress(item: PracticeItem, progress: SubmissionProgress) {
+  return item.grading_status === progress.grading_status && (item.grade ?? null) === progress.grade
+    && (item.has_open_dispute ?? false) === progress.has_open_dispute
+}
+
+function updateGradingStatus(session: Session, itemId: string, progress: SubmissionProgress): Session {
+  const current = findItem(session, itemId)
+  if (!current || hasProgress(current, progress)) return session
+  const update = (item: PracticeItem) => item.id === itemId ? { ...item, ...progress } : item
   return {
     ...session, submitted: session.submitted.map(update),
     selections: session.selections.map(selection => ({ ...selection, item: update(selection.item) })),
@@ -185,7 +199,10 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
 
   const [support, setSupport] = useState<SupportView>()
   const feedbackLeave = useRef<LeaveEditor | null>(null)
-  const lastStatus = useRef<{ itemId: string; status: GradingStatus }>(undefined)
+  const lastStatus = useRef<{ itemId: string; progress: SubmissionProgress }>(undefined)
+  const reviewActionButton = useRef<HTMLButtonElement>(null)
+  const reviewDateLabel = useRef<HTMLDivElement>(null)
+  const focusReviewDate = useRef(false)
   const reviewActionKeys = useRef(new Map<string, string>())
   const gapActionKeys = useRef(new Map<string, string>())
   const operation = useRef(false)
@@ -207,14 +224,16 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
     setLoadAttempt(previous => previous + 1)
   }, [])
 
-  const observeGradingStatus = useCallback((itemId: string, status: GradingStatus) => {
-    if (lastStatus.current?.itemId !== itemId || lastStatus.current?.status !== status) {
-      lastStatus.current = { itemId, status }
-      if (status === 'assessed') requestTodayRefresh()
+  const observeGradingStatus = useCallback((itemId: string, progress: SubmissionProgress) => {
+    const previous = lastStatus.current
+    if (previous?.itemId !== itemId || previous.progress.grading_status !== progress.grading_status
+      || previous.progress.grade !== progress.grade || previous.progress.has_open_dispute !== progress.has_open_dispute) {
+      lastStatus.current = { itemId, progress }
+      if (progress.grading_status === 'assessed') requestTodayRefresh()
     }
-    setSession(current => current && updateGradingStatus(current, itemId, status))
-    setEditor(current => current && current.item.id === itemId && current.item.grading_status !== status
-      ? { ...current, item: { ...current.item, grading_status: status } } : current)
+    setSession(current => current && updateGradingStatus(current, itemId, progress))
+    setEditor(current => current && current.item.id === itemId && !hasProgress(current.item, progress)
+      ? { ...current, item: { ...current.item, ...progress } } : current)
   }, [requestTodayRefresh])
 
   const needsTodayRefresh = useEffectEvent(() => {
@@ -248,7 +267,7 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
         if (controller.signal.aborted || version !== operationVersion.current) return
         const observed = lastStatus.current
         if (observed && observed !== priorStatus) {
-          today = updateGradingStatus(today, observed.itemId, observed.status)
+          today = updateGradingStatus(today, observed.itemId, observed.progress)
         }
         setSession(today)
         setLoadError(false)
@@ -497,6 +516,8 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
           jsonOptions('POST', { idempotency_key: key }),
         )
         reviewActionKeys.current.delete(conceptId)
+        focusReviewDate.current = document.activeElement === document.body
+          || document.activeElement === reviewActionButton.current
         setSession(current => current && { ...current, reviews: { ...current.reviews, [conceptId]: review } })
       } catch {
         setReviewError('Could not confirm the earlier review date. Try again.')
@@ -565,10 +586,25 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
   const picks = [...selections.map(selection => selection.item), ...unfinished, ...submitted]
   const previousItem = editor && !picks.some(item => item.id === editor.item.id) ? editor.item : undefined
   const resumable = previousItem && !previousItem.submitted ? [previousItem, ...unfinished] : unfinished
-  const submittedItems = previousItem?.submitted ? [previousItem, ...submitted] : submitted
+  const submittedItems = (previousItem?.submitted ? [previousItem, ...submitted] : submitted)
+    .filter(item => item.has_open_dispute || item.has_revision_draft
+      || (item.grading_status !== 'assessed' && item.grading_status !== 'self_reported_gap'))
+  const reopenedItem = editor?.item.submitted && !selections.some(({ item }) => item.id === editor.item.id)
+    && !submittedItems.some(item => item.id === editor.item.id) ? editor.item : undefined
   const controlsDisabled = !session || busy || saveState.kind === 'conflict' || saveState.kind === 'submitted_elsewhere'
   const question = editor?.item.question
   const review = question ? session?.reviews?.[question.concept_id] : undefined
+  const tomorrow = session ? nextPracticeDate(session.local_date) : undefined
+  const canMoveReview = tomorrow !== undefined && (review?.due_date
+    ? review.due_date > tomorrow
+    : editor?.item.submitted || review?.awaiting_assessment)
+
+  useEffect(() => {
+    if (!focusReviewDate.current) return
+    focusReviewDate.current = false
+    reviewDateLabel.current?.focus()
+  }, [review?.due_date])
+
   const reviewDates: ReviewDates | undefined = session && {
     today: session.local_date, byConcept: session.reviews ?? {},
   }
@@ -580,241 +616,259 @@ export function Today({ request, active, leaveToday, resumeItemId }: {
     </div>
   ) : (resumePending || !session) && <p className="panel" role="status">Loading saved practice…</p>
 
-  if (resumePending) return <><h1>Today</h1>{loadFeedback}</>
-
   return (
     <>
-      <h1>Today</h1>
-      {loadFeedback}
-      {session && (
-        <PracticeCalendar localDate={session.local_date} selectedDate={historyDate ?? session.local_date}
-          firstUseDate={session.first_use_date} counts={session.completion_counts} goal={session.goal}
-          onSelect={selectDate} />
-      )}
-      {historyDate && active && (
-        <>
-          <History key={historyDate} day={historyDate} request={request} onResume={resumeFromCalendar} />
-          {actionError && <p className="error" role="alert">{actionError}</p>}
-        </>
-      )}
-      <div hidden={!!historyDate}>
-      {session?.shortage && <p className="notice today-shortage" role="status">{session.shortage}</p>}
-      <div className="today-grid">
-        <aside className="panel today-session" aria-labelledby="session-heading">
-          <h2 id="session-heading">Today’s session</h2>
-          {picks.length > 0 && (
+      <header className="today-page-header">
+        <div className="page-title">
+          <h1 tabIndex={-1}>{historyDate ? formatPracticeDate(historyDate) : 'Today'}</h1>
+          {session && !historyDate && <p className="muted"><time dateTime={session.local_date}>{formatPracticeDate(session.local_date)}</time></p>}
+        </div>
+        {loadFeedback}
+        {session && !resumePending && (
+          <PracticeCalendar localDate={session.local_date} selectedDate={historyDate ?? session.local_date}
+            firstUseDate={session.first_use_date} counts={session.completion_counts} goal={session.goal}
+            onSelect={selectDate} />
+        )}
+      </header>
+      {!resumePending && (
+        <div className="page-content">
+          {historyDate && active && (
             <>
-              <div className="today-compact">
-                <label htmlFor="session-question">Session question</label>
-                <select id="session-question" value={editor?.item.id ?? ''} disabled={controlsDisabled}
-                  onChange={event => {
-                    const item = [...picks, ...(previousItem ? [previousItem] : [])]
-                      .find(item => item.id === event.target.value)
-                    if (item) selectItem(item)
-                  }}>
-                  {selections.map(({ item }) => <option key={item.id} value={item.id}>
-                    {item.question.title}{item.submitted ? ` · ${gradingLabel(item)}` : ''}
-                  </option>)}
-                  {resumable.length > 0 && (
-                    <optgroup label="Resume practice">
-                      {resumable.map(item => <option key={item.id} value={item.id}>{item.question.title}</option>)}
-                    </optgroup>
-                  )}
-                  {submittedItems.length > 0 && (
-                    <optgroup label="Submitted answers">
-                      {submittedItems.map(item => <option key={item.id} value={item.id}>
-                        {item.question.title} · {item.local_date} · {gradingLabel(item)}
-                      </option>)}
-                    </optgroup>
-                  )}
-                </select>
-              </div>
-              <div className="today-session-list">
-                <ol>
-                  {selections.map(({ item, kind }, index) => (
-                    <li key={item.id}>
-                      <button type="button" disabled={controlsDisabled} onClick={() => selectItem(item)}
-                        aria-current={editor?.item.id === item.id ? 'true' : undefined}>
-                        <span className="session-order" aria-hidden="true">{index + 1}</span>
-                        <span>{item.question.title}<span className="session-kind">
-                          {{ review: 'Due review', variety: 'Recommendation', extra: 'Extra practice', focused: 'Focused practice' }[kind]}
-                          {item.submitted && ` · ${gradingLabel(item)}`}
-                        </span></span>
-                      </button>
-                    </li>
-                  ))}
-                </ol>
-                {resumable.length > 0 && (
-                  <>
-                    <h3>Resume practice</h3>
-                    <ul>
-                      {resumable.map(item => (
-                        <li key={item.id}>
-                          <button type="button" disabled={controlsDisabled} onClick={() => selectItem(item)}
-                            aria-current={editor?.item.id === item.id ? 'true' : undefined}>
-                            <span>{item.question.title}<span className="session-kind">{item.local_date}</span></span>
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-                {submittedItems.length > 0 && (
-                  <>
-                    <h3>Submitted answers</h3>
-                    <ul>
-                      {submittedItems.map(item => (
-                        <li key={item.id}>
-                          <button type="button" disabled={controlsDisabled} onClick={() => selectItem(item)}
-                            aria-current={editor?.item.id === item.id ? 'true' : undefined}>
-                            <span>{item.question.title}<span className="session-kind">
-                              {item.local_date} · {gradingLabel(item)}
-                            </span></span>
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-              </div>
+              <History key={historyDate} day={historyDate} request={request} onResume={resumeFromCalendar} />
+              {actionError && <p className="error" role="alert">{actionError}</p>}
             </>
           )}
-          {!!session?.due_reviews?.length && (
-            <div className="today-due-reviews">
-              <h3>Due reviews</h3>
-              <ul>
-                {session.due_reviews.map(review => (
-                  <li key={review.question_id}>
-                    <button type="button" disabled={controlsDisabled}
-                      aria-label={`Review ${review.title}`} onClick={() => openDueReview(review)}>
-                      {review.title}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-          <button className="today-more" type="button" disabled={controlsDisabled} onClick={() => void addQuestion({})}>
-            <Plus size={17} aria-hidden="true" /> More questions
-          </button>
-          {notice && <p className="notice" role="status">{notice}</p>}
-          {actionError && <p className="error" role="alert">{actionError}</p>}
-        </aside>
-        {session && editor && question && (
-          <article className="panel today-question" aria-labelledby="practice-question-title">
-            <header className="today-prompt">
-              <p className="today-metadata">{question.section_title} <span aria-hidden="true">·</span> {question.difficulty}</p>
-              <h2 tabIndex={-1} ref={heading} id="practice-question-title">{question.title}</h2>
-              <p>{question.prompt}</p>
-              <p className="today-objective">{question.objective}</p>
-              {(review?.due_date || review?.awaiting_assessment || editor.item.submitted) && (
-                <div className="actions today-review">
-                  {review?.awaiting_assessment && <p role="status">Awaiting accepted assessment</p>}
-                  {review?.due_date && (
-                    <p role="status">
-                      {review.due_date <= session.local_date ? 'Review due' : 'Next review'}{' '}
-                      <time dateTime={review.due_date}>{review.due_date}</time>
-                    </p>
-                  )}
-                  <button type="button"
-                    disabled={controlsDisabled || (!!review?.due_date && review.due_date <= session.local_date)}
-                    onClick={() => void reviewSooner(question.concept_id)}>Review sooner</button>
-                </div>
-              )}
-              {reviewError && <p className="error" role="alert">{reviewError}</p>}
-            </header>
-            {editor.item.submitted ? (
-              <>
-                <PracticeFeedback key={editor.item.id} itemId={editor.item.id} request={request} active={active}
-                  initial={initialSubmission} answerLimit={session.answer_limit} navigationPending={busy}
-                  leaveEditor={feedbackLeave} onStatus={observeGradingStatus} onReviewsChanged={requestTodayRefresh} />
-                <SupportControls support={support?.itemId === editor.item.id ? support : undefined}
-                  disabled={controlsDisabled} onHelp={revealHelp} />
-              </>
-            ) : <div className="today-editor">
-              <div className="today-editor-label">
-                <label htmlFor="practice-answer">Your answer</label>
-                <span className="muted">{question.expected_answer_words.join('–')} words suggested</span>
-              </div>
-              <textarea id="practice-answer" ref={answer} rows={8} value={editor.text} readOnly={busy}
-                spellCheck={false} aria-describedby="draft-help draft-limit" aria-invalid={overLimit || undefined}
-                onChange={event => {
-                  setEditor({ ...editor, text: event.target.value })
-                  setCopyStatus('')
-                  if (saveState.kind === 'saved') setSaveState({ kind: 'idle' })
-                }} />
-              <div className="today-editor-caption">
-                <p id="draft-help">Drafts save here or when you switch questions.</p>
-                <p id="draft-limit" className={overLimit ? 'error' : undefined} aria-live={overLimit ? 'polite' : 'off'}>
-                  {characterCount.toLocaleString('en-GB')} / {session.answer_limit.toLocaleString('en-GB')} characters
-                </p>
-              </div>
-              <p id="submission-privacy" className="today-submission-privacy">
-                For grading, OpenAI receives your answer, the question, its marking guide and reference material.
-              </p>
-              <div className="actions today-draft-actions">
-                <button className="primary" type="button"
-                  aria-describedby="submission-privacy"
-                  disabled={controlsDisabled || overLimit || !editor.text.trim()}
-                  onClick={() => void run(submitAnswer)}>Submit answer</button>
-                <button type="button"
-                  disabled={!dirty || controlsDisabled || overLimit}
-                  onClick={() => void run(async () => { await persistDraft() })}>
-                  {saveState.kind === 'error' ? 'Retry save' : 'Save draft'}
-                </button>
-                <p role="status" className="today-save-status">
-                  {saveState.kind === 'saving' && 'Saving draft…'}
-                  {saveState.kind === 'saved' && 'Draft saved.'}
-                  {saveState.kind === 'idle' && (dirty ? 'Unsaved changes' : editor.item.draft.version > 0 && 'Saved draft loaded.')}
-                </p>
-              </div>
-              <SupportControls support={support?.itemId === editor.item.id ? support : undefined}
-                disabled={controlsDisabled} onHelp={revealHelp} onGap={revealGap} onAcknowledgeGap={acknowledgeGap} />
-              {saveState.kind === 'error' && <p role="alert" tabIndex={-1} ref={saveProblem} className="error">{saveState.message}</p>}
-              {saveState.kind === 'conflict' && (
-                <div className="today-conflict">
-                  <p role="alert" tabIndex={-1} ref={saveProblem}>This draft changed in another tab. Review both versions before choosing which to keep.</p>
-                  <label htmlFor="saved-alternative">Saved in another tab</label>
-                  <textarea id="saved-alternative" readOnly rows={4} value={saveState.saved.text} />
-                  <div className="actions">
-                    <button type="button" disabled={busy} onClick={() => {
-                      acknowledge(saveState.saved)
-                      setSaveState({ kind: 'idle' })
-                    }}>Use saved version</button>
-                    <button type="button" disabled={busy || overLimit} onClick={() => {
-                      void run(async () => { await persistDraft(saveState.saved.version) })
-                    }}>Save my version</button>
+          <div hidden={!!historyDate || !session}>
+            {session?.shortage && <p className="notice today-shortage" role="status">{session.shortage}</p>}
+            <div className="today-grid">
+              <aside className="panel today-session" aria-labelledby="session-heading">
+                <h2 id="session-heading"><ListChecks size={17} aria-hidden="true" /> Today’s session</h2>
+                {(picks.length > 0 || previousItem) && (
+                  <>
+                    <div className="today-compact">
+                      <label htmlFor="session-question">Session question</label>
+                      <select id="session-question" value={editor?.item.id ?? ''} disabled={controlsDisabled}
+                        onChange={event => {
+                          const item = [...picks, ...(previousItem ? [previousItem] : [])]
+                            .find(item => item.id === event.target.value)
+                          if (item) selectItem(item)
+                        }}>
+                        {selections.map(({ item }) => <option key={item.id} value={item.id}>
+                          {item.question.title}{item.submitted
+                            ? ` · ${item.grade != null ? `Grade ${item.grade} of 3` : gradingLabel(item)}` : ''}
+                        </option>)}
+                        {resumable.length > 0 && (
+                          <optgroup label="Resume practice">
+                            {resumable.map(item => <option key={item.id} value={item.id}>{item.question.title}</option>)}
+                          </optgroup>
+                        )}
+                        {submittedItems.length > 0 && (
+                          <optgroup label="Unresolved submissions">
+                            {submittedItems.map(item => <option key={item.id} value={item.id}>
+                              {item.question.title} · {item.local_date} · {gradingLabel(item)}
+                            </option>)}
+                          </optgroup>
+                        )}
+                        {reopenedItem && <option value={reopenedItem.id}>{reopenedItem.question.title} · Saved practice</option>}
+                      </select>
+                    </div>
+                    <div className="today-session-list">
+                      <ol>
+                        {selections.map(({ item, kind }) => (
+                          <li key={item.id}>
+                            <button type="button" disabled={controlsDisabled} onClick={() => selectItem(item)}
+                              aria-current={editor?.item.id === item.id ? 'true' : undefined}>
+                              <span>{item.question.title}<span className="session-kind">
+                                {{ review: 'Due review', variety: 'Recommendation', extra: 'Extra practice', focused: 'Focused practice' }[kind]}
+                                {item.submitted && item.grade == null && ` · ${gradingLabel(item)}`}
+                                {item.grade != null && (item.has_open_dispute || item.has_revision_draft) && ` · ${gradingLabel(item)}`}
+                              </span></span>
+                              {item.grade != null && <GradeScore grade={item.grade} />}
+                            </button>
+                          </li>
+                        ))}
+                      </ol>
+                      {resumable.length > 0 && (
+                        <>
+                          <h3>Resume practice</h3>
+                          <ul>
+                            {resumable.map(item => (
+                              <li key={item.id}>
+                                <button type="button" disabled={controlsDisabled} onClick={() => selectItem(item)}
+                                  aria-current={editor?.item.id === item.id ? 'true' : undefined}>
+                                  <span>{item.question.title}<span className="session-kind">{item.local_date}</span></span>
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      )}
+                      {submittedItems.length > 0 && (
+                        <>
+                          <h3>Unresolved submissions</h3>
+                          <ul>
+                            {submittedItems.map(item => (
+                              <li key={item.id}>
+                                <button type="button" disabled={controlsDisabled} onClick={() => selectItem(item)}
+                                  aria-current={editor?.item.id === item.id ? 'true' : undefined}>
+                                  <span>{item.question.title}<span className="session-kind">
+                                    {item.local_date} · {gradingLabel(item)}
+                                  </span></span>
+                                  {item.grade != null && <GradeScore grade={item.grade} />}
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      )}
+                    </div>
+                  </>
+                )}
+                {!!session?.due_reviews?.length && (
+                  <div className="today-due-reviews">
+                    <h3><Clock3 size={16} aria-hidden="true" /> Due reviews</h3>
+                    <ul>
+                      {session.due_reviews.map(review => (
+                        <li key={review.question_id}>
+                          <button type="button" disabled={controlsDisabled}
+                            aria-label={`Review ${review.title}`} onClick={() => openDueReview(review)}>
+                            {review.title}<ChevronRight size={16} aria-hidden="true" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
-                </div>
+                )}
+                <button className="today-more" type="button" disabled={controlsDisabled} onClick={() => void addQuestion({})}>
+                  <Plus size={17} aria-hidden="true" /> More questions
+                </button>
+                {notice && <p className="notice" role="status">{notice}</p>}
+                {actionError && <p className="error" role="alert">{actionError}</p>}
+              </aside>
+              {session && editor && question && (
+                <article className="panel today-question" aria-labelledby="practice-question-title">
+                  <header className="today-prompt">
+                    <p className="today-metadata">{question.section_title} <span aria-hidden="true">·</span> {question.difficulty}</p>
+                    <h2 tabIndex={-1} ref={heading} id="practice-question-title">{question.title}</h2>
+                    <p>{question.prompt}</p>
+                    <p className="today-objective">{question.objective}</p>
+                  </header>
+                  {editor.item.submitted ? (
+                    <>
+                      <PracticeFeedback key={editor.item.id} itemId={editor.item.id} request={request} active={active}
+                        initial={initialSubmission} answerLimit={session.answer_limit} navigationPending={busy}
+                        leaveEditor={feedbackLeave} onStatus={observeGradingStatus} onReviewsChanged={requestTodayRefresh} />
+                      <div className="today-feedback-support">
+                        <SupportControls support={support?.itemId === editor.item.id ? support : undefined}
+                          disabled={controlsDisabled} onHelp={revealHelp} />
+                      </div>
+                    </>
+                  ) : <div className="today-editor">
+                    <div className="today-editor-label">
+                      <label htmlFor="practice-answer">Your answer</label>
+                      <span className="muted">{question.expected_answer_words.join('–')} words suggested</span>
+                    </div>
+                    <textarea id="practice-answer" ref={answer} rows={8} value={editor.text} readOnly={busy}
+                      spellCheck={false} aria-describedby="draft-help draft-limit" aria-invalid={overLimit || undefined}
+                      onChange={event => {
+                        setEditor({ ...editor, text: event.target.value })
+                        setCopyStatus('')
+                        if (saveState.kind === 'saved') setSaveState({ kind: 'idle' })
+                      }} />
+                    <div className="today-editor-caption">
+                      <p id="draft-help">Drafts save here or when you switch questions.</p>
+                      <p id="draft-limit" className={overLimit ? 'error' : undefined} aria-live={overLimit ? 'polite' : 'off'}>
+                        {characterCount.toLocaleString('en-GB')} / {session.answer_limit.toLocaleString('en-GB')} characters
+                      </p>
+                    </div>
+                    <p id="submission-privacy" className="today-submission-privacy">
+                      For grading, OpenAI receives your answer, the question, its marking guide and reference material.
+                    </p>
+                    <div className="actions today-draft-actions">
+                      <button className="primary" type="button"
+                        aria-describedby="submission-privacy"
+                        disabled={controlsDisabled || overLimit || !editor.text.trim()}
+                        onClick={() => void run(submitAnswer)}>Submit answer</button>
+                      <button type="button"
+                        disabled={!dirty || controlsDisabled || overLimit}
+                        onClick={() => void run(async () => { await persistDraft() })}>
+                        {saveState.kind === 'error' ? 'Retry save' : 'Save draft'}
+                      </button>
+                      <p role="status" className="today-save-status">
+                        {saveState.kind === 'saving' && 'Saving draft…'}
+                        {saveState.kind === 'saved' && 'Draft saved.'}
+                        {saveState.kind === 'idle' && (dirty ? 'Unsaved changes' : editor.item.draft.version > 0 && 'Saved draft loaded.')}
+                      </p>
+                    </div>
+                    <SupportControls support={support?.itemId === editor.item.id ? support : undefined}
+                      disabled={controlsDisabled} onHelp={revealHelp} onGap={revealGap} onAcknowledgeGap={acknowledgeGap} />
+                    {saveState.kind === 'error' && <p role="alert" tabIndex={-1} ref={saveProblem} className="error">{saveState.message}</p>}
+                    {saveState.kind === 'conflict' && (
+                      <div className="today-conflict">
+                        <p role="alert" tabIndex={-1} ref={saveProblem}>This draft changed in another tab. Review both versions before choosing which to keep.</p>
+                        <label htmlFor="saved-alternative">Saved in another tab</label>
+                        <textarea id="saved-alternative" readOnly rows={4} value={saveState.saved.text} />
+                        <div className="actions">
+                          <button type="button" disabled={busy} onClick={() => {
+                            acknowledge(saveState.saved)
+                            setSaveState({ kind: 'idle' })
+                          }}>Use saved version</button>
+                          <button type="button" disabled={busy || overLimit} onClick={() => {
+                            void run(async () => { await persistDraft(saveState.saved.version) })
+                          }}>Save my version</button>
+                        </div>
+                      </div>
+                    )}
+                    {saveState.kind === 'submitted_elsewhere' && (
+                      <div className="today-conflict">
+                        <p role="alert" tabIndex={-1} ref={saveProblem}>
+                          An answer was submitted in another tab. Copy your edit if you want to keep it.
+                        </p>
+                        <button type="button" onClick={() => {
+                          showItem({ ...editor.item, submitted: true })
+                          retryToday()
+                          heading.current?.focus()
+                        }}>View submitted answer</button>
+                      </div>
+                    )}
+                    {(saveState.kind === 'error' || saveState.kind === 'conflict' || saveState.kind === 'submitted_elsewhere' || overLimit) && (
+                      <div className="actions today-copy">
+                        <button type="button" onClick={() => void copyAnswer()}>Copy my answer</button>
+                        <span role="status">{copyStatus}</span>
+                      </div>
+                    )}
+                  </div>}
+                  {(review?.due_date || review?.awaiting_assessment || canMoveReview || reviewError) && (
+                    <footer className="today-review">
+                      <div className="today-review-date" role="status" ref={reviewDateLabel} tabIndex={-1}>
+                        <CalendarDays size={18} aria-hidden="true" />
+                        <div>
+                          {review?.due_date && <p>
+                            <span>{review.due_date <= session.local_date ? 'Review due' : 'Next review'} </span>
+                            <time dateTime={review.due_date}>
+                              {review.due_date === tomorrow && 'Tomorrow, '}{formatPracticeDate(review.due_date)}
+                            </time>
+                          </p>}
+                          {review?.awaiting_assessment && <p>Awaiting accepted assessment</p>}
+                          {!review?.due_date && !review?.awaiting_assessment && <p>Review date not set</p>}
+                        </div>
+                      </div>
+                      {canMoveReview && <button className="review-action" type="button" ref={reviewActionButton} disabled={controlsDisabled}
+                        onClick={() => void reviewSooner(question.concept_id)}>Move review to tomorrow</button>}
+                      {reviewError && <p className="error" role="alert">{reviewError}</p>}
+                    </footer>
+                  )}
+                </article>
               )}
-              {saveState.kind === 'submitted_elsewhere' && (
-                <div className="today-conflict">
-                  <p role="alert" tabIndex={-1} ref={saveProblem}>
-                    An answer was submitted in another tab. Copy your edit if you want to keep it.
-                  </p>
-                  <button type="button" onClick={() => {
-                    showItem({ ...editor.item, submitted: true })
-                    retryToday()
-                    heading.current?.focus()
-                  }}>View submitted answer</button>
-                </div>
-              )}
-              {(saveState.kind === 'error' || saveState.kind === 'conflict' || saveState.kind === 'submitted_elsewhere' || overLimit) && (
-                <div className="actions today-copy">
-                  <button type="button" onClick={() => void copyAnswer()}>Copy my answer</button>
-                  <span role="status">{copyStatus}</span>
-                </div>
-              )}
-            </div>}
-          </article>
-        )}
-      </div>
-      <details className="today-bank" open={browsing} onToggle={event => setBrowsing(event.currentTarget.open)}>
-        <summary>Browse questions</summary>
-        {browsing && <QuestionBrowser request={request} onPractice={choice => void addQuestion(choice)}
-          practiceDisabled={controlsDisabled} reviewDates={reviewDates} />}
-      </details>
-      </div>
+            </div>
+            <details className="today-bank" open={browsing} onToggle={event => setBrowsing(event.currentTarget.open)}>
+              <summary>Browse questions</summary>
+              {browsing && <QuestionBrowser request={request} onPractice={choice => void addQuestion(choice)}
+                practiceDisabled={controlsDisabled} reviewDates={reviewDates} />}
+            </details>
+          </div>
+        </div>
+      )}
     </>
   )
 }

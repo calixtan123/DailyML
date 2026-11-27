@@ -1,18 +1,10 @@
 import { type ReactNode, type RefObject, useEffect, useRef, useState } from 'react'
+import { AnswerText, Assessment, type AssessedFeedback } from './Assessment'
 import { LocalApiError, type LocalRequest } from './api'
 import { FollowUpEditor, type FollowUpEdit } from './FollowUpEditor'
 import type { Draft, LeaveEditor } from './drafts'
 
-type Feedback = {
-  status: 'assessed'
-  summary: string
-  corrections: string[]
-  model_answer: string
-  reasoning: string[]
-  example: string
-  source_ids: string[]
-  follow_up?: string[]
-} | { status: 'needs_clarification'; explanation: string }
+type Feedback = AssessedFeedback | { status: 'needs_clarification'; explanation: string }
 
 const REQUEST_LABELS = {
   awaiting_access: 'Waiting for grading access',
@@ -29,6 +21,7 @@ type GradingRequest = {
   id: string
   state: keyof typeof REQUEST_LABELS
   grade: number | null
+  finished_at?: number | null
   can_send: boolean
   message: string | null
   feedback: Feedback | null
@@ -86,6 +79,23 @@ export type SavedSubmission = Omit<AnswerTrack, 'request' | 'submission_version_
   revision: AnswerTrack | null
   revision_draft: Draft | null
   disputes?: Dispute[]
+}
+
+export type SubmissionProgress = {
+  grading_status: GradingStatus
+  grade: number | null
+  has_open_dispute: boolean
+}
+
+function submissionProgress(saved: SavedSubmission): SubmissionProgress {
+  const job = saved.revision?.request ?? saved.request
+  const dispute = saved.disputes?.find(entry => entry.target_request_id === job.id)
+  const chosen = dispute?.assessments.find(assessment => assessment.id === dispute.selected_request_id)
+  return {
+    grading_status: job.can_send ? 'ready_to_send' : job.state,
+    grade: job.state === 'assessed' ? (chosen?.grade ?? job.grade) : null,
+    has_open_dispute: saved.disputes?.some(entry => entry.status === 'open') ?? false,
+  }
 }
 
 type FollowUp = {
@@ -151,46 +161,13 @@ function isActive(job: GradingRequest | GapRequest | undefined) {
   return job?.state === 'in_flight' || (job?.state === 'queued' && !job.can_send)
 }
 
-function Assessment({ job, feedback, title = 'AI-generated feedback' }: {
-  job: GradingRequest
-  feedback: Extract<Feedback, { status: 'assessed' }>
-  title?: string
-}) {
-  return (
-    <section className="grading-result" aria-label={title}>
-      <h4>{title}</h4>
-      <p role="status"><strong>Grade {job.grade} of 3</strong></p>
-      <h5>What you understood</h5>
-      <p>{feedback.summary}</p>
-      {feedback.corrections.length > 0 && (
-        <>
-          <h5>What to improve</h5>
-          <ul>{feedback.corrections.map((point, index) => <li key={index}>{point}</li>)}</ul>
-        </>
-      )}
-      <h5>Model answer</h5>
-      <p>{feedback.model_answer}</p>
-      <details>
-        <summary>Reasoning, example and sources</summary>
-        <ol>{feedback.reasoning.map((step, index) => <li key={index}>{step}</li>)}</ol>
-        <p>{feedback.example}</p>
-        {feedback.source_ids.map(id => {
-          const source = job.reference.sources[id]
-          return source?.startsWith('https://') && <p key={id}><a href={source} target="_blank" rel="noreferrer">{id}</a></p>
-        })}
-        {feedback.follow_up?.map((point, index) => <p key={index}>{point}</p>)}
-      </details>
-    </section>
-  )
-}
-
 function RequestFeedback({ job, disabled, retry, children }: {
   job: GradingRequest
   disabled: boolean
   retry: () => void
   children?: ReactNode
 }) {
-  if (job.feedback?.status === 'assessed') return <Assessment job={job} feedback={job.feedback} />
+  if (job.feedback?.status === 'assessed') return <Assessment grade={job.grade} feedback={job.feedback} sources={job.reference.sources} announceGrade />
   return (
     <>
       <p role="status"><strong>{REQUEST_LABELS[job.state]}</strong></p>
@@ -211,15 +188,6 @@ function RequestFeedback({ job, disabled, retry, children }: {
         </>
       )}
     </>
-  )
-}
-
-function AnswerText({ label, text, open }: { label: string; text: string; open?: boolean }) {
-  return (
-    <details open={open}>
-      <summary>{label}</summary>
-      <p className="practice-original">{text}</p>
-    </details>
   )
 }
 
@@ -288,7 +256,8 @@ function AssessmentDispute({ job, dispute, disabled, act }: {
       </div>}
       {available.map(candidate => candidate.feedback?.status === 'assessed' && (
         <div className="practice-attempt" key={candidate.id}>
-          <Assessment job={candidate} feedback={candidate.feedback} title="AI-generated reassessment" />
+          <Assessment grade={candidate.grade} feedback={candidate.feedback} sources={candidate.reference.sources}
+            title="Reassessment" announceGrade />
           {isOpen && <div className="actions">
             <button type="button" disabled={disabled} onClick={() => accept(candidate.id)}>Accept reassessment</button>
           </div>}
@@ -320,7 +289,7 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
   answerLimit: number
   navigationPending: boolean
   leaveEditor: RefObject<LeaveEditor | null>
-  onStatus: (itemId: string, status: GradingStatus) => void
+  onStatus: (itemId: string, progress: SubmissionProgress) => void
   onReviewsChanged?: () => void
 }) {
   const [view, setView] = useState<FeedbackView>({ submission: initial })
@@ -365,7 +334,7 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
         lastRead.current = saved
         setView(previous => mergeRead(previous, saved))
         const job = saved.revision?.request ?? saved.request
-        onStatus(itemId, job.can_send ? 'ready_to_send' : job.state)
+        onStatus(itemId, submissionProgress(saved))
         setReadError(false)
         if (isActive(job) || saved.disputes?.some(dispute => dispute.assessments.some(isActive))) {
           timer = setTimeout(refresh, POLL_MS)
@@ -406,8 +375,7 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
       lastRead.current = saved
       focusAfterSend.current = true
       setView({ submission: saved })
-      const job = saved.revision?.request ?? saved.request
-      onStatus(itemId, job.can_send ? 'ready_to_send' : job.state)
+      onStatus(itemId, submissionProgress(saved))
       refresh()
     } catch (error) {
       if (!controller.signal.aborted) {
@@ -463,6 +431,7 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
       reassessmentKeys.current.delete(route)
       lastRead.current = saved
       setView(previous => mergeRead(previous, saved))
+      onStatus(itemId, submissionProgress(saved))
       if (route === 'disputes' || route.endsWith('/resolve')) onReviewsChanged?.()
       setReload(value => value + 1)
       return true
@@ -519,13 +488,13 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
             </>
           ) : <section className="practice-attempt" aria-labelledby="original-attempt">
             <h3 id="original-attempt" ref={originalHeading} tabIndex={-1}>Original attempt</h3>
-            <AnswerText label="Original answer" text={submission.text} open={Boolean(revision) || original.feedback?.status !== 'assessed'} />
-            {submission.assessed_text !== submission.text && (
-              <AnswerText label="Clarified original answer" text={submission.assessed_text} open />
-            )}
             <RequestFeedback job={original} disabled={disabled} retry={() => void send(original.id, 'retry')}>
               {editor?.track === 'original' && followUpEditor}
             </RequestFeedback>
+            {submission.assessed_text !== submission.text && <AnswerText label="Original answer" text={submission.text} />}
+            <AnswerText label={submission.assessed_text === submission.text
+              ? 'Your submitted answer' : 'Your submitted answer (clarified original)'}
+              text={submission.assessed_text} open={original.feedback?.status !== 'assessed'} />
             <AssessmentDispute key={original.id} job={original} disabled={disabled} act={updateDispute}
               dispute={submission.disputes?.find(dispute => dispute.target_request_id === original.id)} />
             {submission.assisted && <p className="muted">Assisted practice — help was viewed before this answer was submitted.</p>}
@@ -533,14 +502,15 @@ export function PracticeFeedback({ itemId, request, active, initial, answerLimit
           {revision && (
             <section className="practice-attempt" aria-labelledby="assisted-revision">
               <h3 id="assisted-revision" ref={revisionHeading} tabIndex={-1}>Assisted revision</h3>
+              <RequestFeedback job={revision.request} disabled={disabled} retry={() => void send(revision.request.id, 'retry')}>
+                {editor?.track === 'revision' && followUpEditor}
+              </RequestFeedback>
               {initialRevision && initialRevision.id !== revision.submission_version_id && (
                 <AnswerText label="First revised answer" text={initialRevision.text} />
               )}
               <AnswerText label={initialRevision && initialRevision.id !== revision.submission_version_id
-                ? 'Clarified revision' : 'Revised answer'} text={revision.assessed_text} open />
-              <RequestFeedback job={revision.request} disabled={disabled} retry={() => void send(revision.request.id, 'retry')}>
-                {editor?.track === 'revision' && followUpEditor}
-              </RequestFeedback>
+                ? 'Your submitted answer (clarified revision)' : 'Your submitted answer (revision)'}
+                text={revision.assessed_text} open />
               <AssessmentDispute key={revision.request.id} job={revision.request} disabled={disabled} act={updateDispute}
                 dispute={submission.disputes?.find(dispute => dispute.target_request_id === revision.request.id)} />
             </section>

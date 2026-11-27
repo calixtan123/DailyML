@@ -17,7 +17,14 @@ from .database import Database
 from .grading import GradingContext
 from .grading_jobs import enqueue_practice_request, practice_grading_status, public_request
 from .practice_versions import bind_grading_version, initialize_versions, save_answer_version
-from .disputes import disputes_projection, initialize_disputes, register_reassessment, resolve_dispute
+from .disputes import (
+    CURRENT_ASSESSMENT_JOIN,
+    CURRENT_ASSESSMENT_SUMMARY,
+    disputes_projection,
+    initialize_disputes,
+    register_reassessment,
+    resolve_dispute,
+)
 from .scheduling import (
     NEXT_DAY,
     ReviewState,
@@ -200,6 +207,9 @@ class PracticeItem:
     draft: Draft
     submitted: bool = False
     grading_status: str | None = None
+    grade: int | None = None
+    has_open_dispute: bool = False
+    has_revision_draft: bool = False
 
 
 @dataclass(frozen=True)
@@ -636,16 +646,17 @@ class Practice:
         """Read an exact saved editor item without selecting it for today's practice."""
         with self.database.connect() as connection:
             row = connection.execute(
-                """SELECT item.id, item.local_date, item.section_title, item.snapshot_json,
+                f"""SELECT item.id, item.local_date, item.section_title, item.snapshot_json,
                           item.draft_text, item.draft_version,
                           CASE WHEN gap.item_id IS NOT NULL THEN 'self_reported_gap' ELSE request.state END,
-                          request.error
+                          request.error, {CURRENT_ASSESSMENT_SUMMARY}
                    FROM practice_items AS item
                    LEFT JOIN practice_submissions AS submission ON submission.item_id = item.id
                    LEFT JOIN practice_gap_completions AS gap ON gap.item_id = item.id
                    LEFT JOIN practice_revisions AS revision ON revision.item_id = item.id
                    LEFT JOIN grading_requests AS request
                      ON request.id = COALESCE(revision.current_request_id, submission.current_request_id)
+                   {CURRENT_ASSESSMENT_JOIN}
                    WHERE item.id = ?""", (item_id,),
             ).fetchone()
         if row is None:
@@ -1553,10 +1564,10 @@ class Practice:
         selections = [
             PracticeSelection(kind, self._item(row))
             for kind, *row in connection.execute(
-                """SELECT selection.kind, item.id, item.local_date, item.section_title,
+                f"""SELECT selection.kind, item.id, item.local_date, item.section_title,
                           item.snapshot_json, item.draft_text, item.draft_version,
                           CASE WHEN gap.item_id IS NOT NULL THEN 'self_reported_gap' ELSE request.state END,
-                          request.error
+                          request.error, {CURRENT_ASSESSMENT_SUMMARY}
                    FROM practice_selections AS selection
                    JOIN practice_items AS item ON item.id = selection.item_id
                    LEFT JOIN practice_submissions AS submission ON submission.item_id = item.id
@@ -1564,6 +1575,7 @@ class Practice:
                    LEFT JOIN practice_revisions AS revision ON revision.item_id = item.id
                    LEFT JOIN grading_requests AS request
                      ON request.id = COALESCE(revision.current_request_id, submission.current_request_id)
+                   {CURRENT_ASSESSMENT_JOIN}
                    WHERE selection.local_date = ?
                    ORDER BY selection.slot""",
                 (local_date,),
@@ -1573,7 +1585,7 @@ class Practice:
             self._item(row)
             for row in connection.execute(
                 """SELECT item.id, item.local_date, item.section_title, item.snapshot_json,
-                          item.draft_text, item.draft_version, NULL, NULL
+                          item.draft_text, item.draft_version, NULL, NULL, NULL, 0, 0
                    FROM practice_items AS item
                    WHERE trim(item.draft_text) <> ''
                      AND item.id NOT IN (SELECT item_id FROM practice_submissions)
@@ -1597,16 +1609,17 @@ class Practice:
         submitted = [
             self._item(row)
             for row in connection.execute(
-                """SELECT item.id, item.local_date, item.section_title,
+                f"""SELECT item.id, item.local_date, item.section_title,
                           item.snapshot_json, item.draft_text, item.draft_version,
                           CASE WHEN gap.item_id IS NOT NULL THEN 'self_reported_gap' ELSE request.state END,
-                          request.error
+                          request.error, {CURRENT_ASSESSMENT_SUMMARY}
                    FROM practice_items AS item
                    LEFT JOIN practice_submissions AS submission ON submission.item_id = item.id
                    LEFT JOIN practice_gap_completions AS gap ON gap.item_id = item.id
                    LEFT JOIN practice_revisions AS revision ON revision.item_id = item.id
                    LEFT JOIN grading_requests AS request
                      ON request.id = COALESCE(revision.current_request_id, submission.current_request_id)
+                   {CURRENT_ASSESSMENT_JOIN}
                    WHERE (gap.completed_date >= ? OR submission.item_id IS NOT NULL)
                      AND NOT EXISTS (
                         SELECT 1 FROM practice_selections WHERE local_date = ? AND item_id = item.id
@@ -1639,7 +1652,10 @@ class Practice:
     @staticmethod
     def _item(row: Sequence) -> PracticeItem:
         """Project an immutable stored snapshot onto learner-visible prompt fields."""
-        item_id, local_date, section_title, snapshot_json, text, version, request_state, request_error = row
+        (
+            item_id, local_date, section_title, snapshot_json, text, version,
+            request_state, request_error, grade, has_open_dispute, has_revision_draft,
+        ) = row
         record = json.loads(snapshot_json)
         question = PracticeQuestion(
             record["id"], record["version"], record["section_id"], section_title,
@@ -1647,4 +1663,7 @@ class Practice:
             record["difficulty"], tuple(record["expected_answer_words"]),
         )
         grading_status = practice_grading_status(request_state, request_error) if request_state else None
-        return PracticeItem(item_id, local_date, question, Draft(text, version), request_state is not None, grading_status)
+        return PracticeItem(
+            item_id, local_date, question, Draft(text, version), request_state is not None, grading_status,
+            grade, bool(has_open_dispute), bool(has_revision_draft),
+        )

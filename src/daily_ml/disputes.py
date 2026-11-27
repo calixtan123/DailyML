@@ -40,6 +40,27 @@ _SCHEMA = (
 )
 
 
+# Summary queries join the current revision or original request. A resolved
+# dispute may choose a different assessment for that request.
+CURRENT_ASSESSMENT_JOIN = """
+    LEFT JOIN practice_disputes AS disputed ON disputed.target_request_id = request.id
+    LEFT JOIN grading_requests AS accepted ON accepted.id = disputed.selected_request_id
+"""
+CURRENT_ASSESSMENT_SUMMARY = """
+    CASE WHEN request.state = 'assessed' THEN COALESCE(accepted.grade, request.grade) END,
+    EXISTS (
+        SELECT 1 FROM practice_disputes AS pending
+        WHERE pending.target_request_id IN (submission.current_request_id, revision.current_request_id)
+          AND pending.selected_request_id IS NULL
+    ),
+    EXISTS (
+        SELECT 1 FROM practice_revision_drafts AS draft
+        WHERE draft.request_id = submission.current_request_id
+          AND revision.item_id IS NULL
+    )
+"""
+
+
 def initialize_disputes(connection: sqlite3.Connection) -> None:
     """Create additive immutable dispute storage in the active schema transaction."""
     for statement in _SCHEMA:
