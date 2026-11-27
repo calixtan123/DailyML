@@ -87,7 +87,7 @@ export type SubmissionProgress = {
   has_open_dispute: boolean
 }
 
-function submissionProgress(saved: SavedSubmission): SubmissionProgress {
+export function submissionProgress(saved: SavedSubmission): SubmissionProgress {
   const job = saved.revision?.request ?? saved.request
   const dispute = saved.disputes?.find(entry => entry.target_request_id === job.id)
   const chosen = dispute?.assessments.find(assessment => assessment.id === dispute.selected_request_id)

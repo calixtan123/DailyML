@@ -30,7 +30,7 @@ function detail(itemId = 'saved-1') {
       revision: null,
       disputes: [{ id: 'dispute-1', status: 'resolved', target_request_id: 'request-1', role: 'original', selected_request_id: 'assessment-2', objection: 'The rubric missed my split.', assessments: [
         { id: 'request-1', state: 'assessed', grade: 2, can_send: false, message: null, reference: { sources: {} }, feedback: { status: 'assessed', summary: 'Original comparison explanation', corrections: [], model_answer: 'Original model answer.', reasoning: ['Original reasoning'], example: 'Original example', source_ids: [] } },
-        { id: 'assessment-2', state: 'assessed', grade: 3, can_send: false, message: null, reference: { sources: {} }, feedback: { status: 'assessed', summary: 'Reassessment comparison explanation', corrections: ['Explains the comparison'], model_answer: 'Reassessed model answer.', reasoning: ['Reassessed reasoning'], example: 'Reassessed example', source_ids: [] } },
+        { id: 'assessment-2', state: 'assessed', grade: 0, can_send: false, message: null, reference: { sources: {} }, feedback: { status: 'assessed', summary: 'Reassessment comparison explanation', corrections: ['Explains the comparison'], model_answer: 'Reassessed model answer.', reasoning: ['Reassessed reasoning'], example: 'Reassessed example', source_ids: [] } },
       ] }],
     },
     support: { reveals: ['hint'], gap_completed: false }, assessed_at: 1_794_998_400,
@@ -66,12 +66,34 @@ describe('History', () => {
     expect(await within(row).findByText('Think about unseen examples.')).toBeTruthy()
     expect(screen.getAllByText('Original saved answer').length).toBeGreaterThan(0)
     expect(screen.getByText('Good reasoning')).toBeTruthy()
-    expect(within(row).getAllByText('Grade 0 of 3')).toHaveLength(2)
+    expect(within(row).getByRole('article')).toBeTruthy()
+    expect(within(row).getAllByText('Grade 0 of 3').length).toBeGreaterThan(1)
     expect(spy).toHaveBeenCalledWith('/api/history?activity_date=2026-11-17', expect.anything())
     expect(screen.queryByLabelText('From date')).toBeNull()
     fireEvent.click(toggle)
     expect(toggle.getAttribute('aria-expanded')).toBe('false')
     expect(within(row).queryByText('Good reasoning')).toBeNull()
+  })
+
+  it.each([undefined, '2026-11-17'])('updates only the selected row when saved evidence has a new grade (calendar day %s)', async day => {
+    const ungraded = { ...entries[0], grade: null, status: 'awaiting_access' }
+    const { request } = mockRequest(path => {
+      if (path === '/api/history/sections') return []
+      if (path === '/api/history/saved-1') return detail()
+      return { entries: [ungraded, { ...ungraded, item_id: 'saved-2', title: 'Data leakage' }], next_cursor: null }
+    })
+    render(<History day={day} request={request} onResume={vi.fn()} />)
+    const toggle = await screen.findByRole('button', { name: 'Generalisation' })
+    const row = toggle.closest('li')!
+    const unaffected = screen.getByRole('button', { name: 'Data leakage' })
+    expect(within(toggle).getByText('Waiting for grading access')).toBeTruthy()
+    fireEvent.click(toggle)
+
+    expect(await within(row).findByRole('article', { name: 'Generalisation' })).toBeTruthy()
+    expect(within(toggle).getByText('Grade 0 of 3')).toBeTruthy()
+    expect(within(unaffected).getByText('Waiting for grading access')).toBeTruthy()
+    fireEvent.click(toggle)
+    expect(within(toggle).getByText('Grade 0 of 3')).toBeTruthy()
   })
 
   it.each([undefined, '2026-11-17'])('retries and refreshes a selected record (calendar day %s)', async day => {

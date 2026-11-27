@@ -2,7 +2,7 @@ import { ChevronDown } from 'lucide-react'
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import { AnswerText, Assessment, GradeScore } from './Assessment'
 import { formatPracticeDate } from './practiceDates'
-import type { SavedSubmission } from './PracticeFeedback'
+import { submissionProgress, type SavedSubmission } from './PracticeFeedback'
 import type { LocalRequest } from './api'
 
 type Section = { id: string; title: string }
@@ -130,6 +130,27 @@ function Feedback({ submission }: { submission: SavedSubmission }) {
       )}
     </section>
   )
+}
+
+function entrySummary(detail: HistoryDetail): Pick<HistoryEntry, 'status' | 'grade' | 'has_open_dispute' | 'has_revision_draft' | 'completed_date'> {
+  if (!detail.submission) {
+    return {
+      status: /[^\t\n\v\f\r ]/.test(detail.draft.text) ? 'unfinished' : 'support_viewed',
+      grade: null,
+      has_open_dispute: false,
+      has_revision_draft: false,
+      completed_date: null,
+    }
+  }
+  const submission = detail.submission
+  const { grading_status, grade, has_open_dispute } = submissionProgress(submission)
+  return {
+    status: grading_status,
+    grade,
+    has_open_dispute,
+    has_revision_draft: (submission.revision_draft?.version ?? 0) > 0,
+    completed_date: submission.completed_date,
+  }
 }
 
 function Detail({ detail, onResume }: {
@@ -289,7 +310,16 @@ export function History({ request, onResume, day }: {
     if (!itemId) return
     const controller = new AbortController()
     const settle = (state: Exclude<LoadState<HistoryDetail>, { kind: 'loading' }>) => {
-      if (!controller.signal.aborted) setDetail({ itemId, revision: detailRevision, state })
+      if (controller.signal.aborted) return
+      setDetail({ itemId, revision: detailRevision, state })
+      if (state.kind === 'ready') {
+        const summary = entrySummary(state.value)
+        setPage(previous => previous.kind === 'ready'
+          ? { kind: 'ready', value: {
+            ...previous.value,
+            entries: previous.value.entries.map(entry => entry.item_id === itemId ? { ...entry, ...summary } : entry),
+          } } : previous)
+      }
     }
     request<HistoryDetail>(`/api/history/${itemId}`, { signal: controller.signal }).then(
       value => settle(value.item_id === itemId ? { kind: 'ready', value } : { kind: 'error' }),
