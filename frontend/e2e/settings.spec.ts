@@ -132,17 +132,28 @@ test('The installed app saves practice drafts and preserves Settings and sign-in
       await expect(editor).toHaveValue('Save this answer before moving through browser history.')
 
       const compact = page.getByRole('combobox', { name: 'Session question', exact: true })
-      for (const width of [1440, 1024, 768, 390, 320]) {
+      const mainNavigation = page.getByRole('navigation', { name: 'Main navigation' })
+      const questionCard = page.locator('.today-question')
+      for (const width of [1440, 1024, 768]) {
         await page.setViewportSize({ width, height: 900 })
+        await expect(compact).toBeHidden()
+        const [left, center, right] = await Promise.all([
+          mainNavigation.boundingBox(), questionCard.boundingBox(), session.boundingBox(),
+        ])
+        if (!left || !center || !right) throw new Error('The three practice columns must be visible.')
+        expect(left.x + left.width).toBeLessThanOrEqual(center.x)
+        expect(center.x + center.width).toBeLessThanOrEqual(right.x)
+        expect(Math.max(left.y, center.y, right.y)).toBeLessThan(
+          Math.min(left.y + left.height, center.y + center.height, right.y + right.height),
+        )
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
-        if (width > 1020) {
-          await expect(compact).toBeHidden()
-          expect((await session.boundingBox())?.width).toBe(232)
-          expect(await page.locator('.today-grid').evaluate(node => getComputedStyle(node).columnGap)).toBe('24px')
-        } else {
-          await expect(compact).toBeVisible()
-          expect((await compact.boundingBox())?.height).toBeGreaterThanOrEqual(44)
-        }
+        await expect(page.getByRole('button', { name: 'More questions' })).toBeVisible()
+      }
+      for (const width of [390, 320]) {
+        await page.setViewportSize({ width, height: 900 })
+        await expect(compact).toBeVisible()
+        expect((await compact.boundingBox())?.height).toBeGreaterThanOrEqual(44)
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
         await expect(page.getByRole('button', { name: 'More questions' })).toBeVisible()
       }
       await page.setViewportSize({ width: 390, height: 900 })
