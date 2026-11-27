@@ -106,7 +106,7 @@ describe('Daily ML Practice', () => {
     expect(screen.queryByRole('button', { name: 'Run connection test' })).toBeNull()
 
     fireEvent.click(screen.getByRole('link', { name: 'Skip to content' }))
-    expect(document.activeElement).toBe(screen.getByRole('main'))
+    expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1, name: 'Settings' }))
     expect(window.location.hash).toBe('#/settings')
 
     fireEvent.click(screen.getByRole('link', { name: 'Today' }))
