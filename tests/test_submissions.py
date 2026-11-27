@@ -168,7 +168,7 @@ def test_resolving_original_dispute_with_reassessment_selects_only_its_saved_ver
     }).json()
 
     entry, = client.get("/api/history").json()["entries"]
-    assert entry["grade"] == original["request"]["grade"] == 3
+    assert entry["grade"] == opened["request"]["grade"] == 3
     assert entry["has_open_dispute"] is True
     client.app.state.grading.provider = provider(
         lambda outbound: response_stream(_valid_terminal(outbound, criterion_status="not_met")),
